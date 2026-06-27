@@ -17,7 +17,7 @@
 - 远端源码落点：宿主机 `/home/haizh/dsa-src`（git clone 得到，见 §5.1）。
 - 服务运行容器：`dsa-server`，镜像 `zhulinsen/daily_stock_analysis:latest`，对外端口 `8001`，容器内工作目录 `/app`，运行命令 `python main.py --serve-only --host 0.0.0.0 --port 8001`。
 - **远端访问 github.com 必须经代理 `http://127.0.0.1:7897`**（直连不通）；`git clone`/`pull` 需带 `-c http.proxy=http://127.0.0.1:7897`。
-- `dsa-server` 是 Docker Hub 发布镜像、**仅挂载后端 Python 源码**（`src/`、`api/`、`main.py` 等，落点 `/home/haizh/dsa-src`），**保留镜像内前端 `static/`**；远端 `git pull` 拉新分支后重启即用最新源码逻辑；依赖位于镜像 `/usr/local/lib`（site-packages），不受源码挂载影响（需 `FASTAPI_STARTUP_TIMEOUT=15` 适配冷启动，见 §5.3）。镜像内仍**默认无 `tests/`、`scripts/`、`pytest`、`flake8`**（随源码挂载进入，但宿主机/临时挂载容器才是单测/静态检查的执行位置，见 §5.2）。
+- `dsa-server` 是 Docker Hub 发布镜像、**仅挂载后端 Python 源码**（`src/`、`api/`、`main.py` 等，落点 `/home/haizh/dsa-src`），**保留镜像内前端 `static/`**；远端 `git pull` 拉新分支后重启即用最新源码逻辑；依赖位于镜像 `/usr/local/lib`（site-packages），不受源码挂载影响（冷启动需 `FASTAPI_STARTUP_TIMEOUT` 默认 15s，见 §5.3）。镜像内仍**默认无 `tests/`、`scripts/`、`pytest`、`flake8`**（随源码挂载进入，但宿主机/临时挂载容器才是单测/静态检查的执行位置，见 §5.2）。
 
 ## 3. Git 约束（强制）
 
@@ -117,7 +117,7 @@ docker run -d \
 ```
 
 - `chmod` 段修复 efinance 缓存权限，**不可省略**。
-- `FASTAPI_STARTUP_TIMEOUT=15`：挂载源码首次冷 import `api.app`（全量 `src/` + SearchService）较慢，需大于镜像内默认的 3s 探针超时，否则启动被掐断（实测约 9s，15s 留余量）。
+- `FASTAPI_STARTUP_TIMEOUT`（代码默认 `15.0`）：挂载源码首次冷 import `api.app`（全量 `src/` + SearchService，实测约 9s）远大于原先硬编码的 3s，故 `main.py` 已把默认探针超时调到 15s。docker run 中显式 `-e FASTAPI_STARTUP_TIMEOUT=15` 是**可选**覆盖项（默认即够用）；仅当冷启动仍超时才需调大。
 - `data/`、`logs/`、`.env` 挂载自运行态目录 `/home/haizh/opensource/daily_stock_analysis`；`/home/haizh/dsa-src` 必须是已完成 `git clone`/`pull` 的源码 checkout，否则容器缺 `main.py`/`src/`，服务无法启动。
 - 仅当新代码引入新 pip 依赖时才需 `docker pull zhulinsen/daily_stock_analysis:latest` 重建镜像（依赖装在镜像 `/usr/local/lib`，源码挂载覆盖不到）。
 
