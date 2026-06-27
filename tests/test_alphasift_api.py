@@ -2713,6 +2713,33 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(captured["daily_source"], "akshare")
         self.assertEqual(payload["candidate_count"], 0)
 
+    def test_dsa_daily_history_provider_bypasses_tencent_source(self) -> None:
+        fake_daily_module = ModuleType("alphasift.daily")
+        original_fetch = MagicMock(return_value={"source": "native_tencent"})
+        fake_daily_module.fetch_daily_history = original_fetch
+        dsa_history = MagicMock(return_value=("should_not_be_used", "TencentFetcher"))
+
+        with (
+            patch("src.services.alphasift_service.importlib.import_module", return_value=fake_daily_module),
+            patch("src.services.alphasift_service.get_dsa_daily_history", dsa_history),
+        ):
+            with alphasift_service._alphasift_dsa_daily_history_provider():
+                result = fake_daily_module.fetch_daily_history(
+                    "002191",
+                    lookback_days=120,
+                    source="tencent",
+                    retries=2,
+                )
+
+        self.assertEqual(result, {"source": "native_tencent"})
+        original_fetch.assert_called_once_with(
+            "002191",
+            lookback_days=120,
+            source="tencent",
+            retries=2,
+        )
+        dsa_history.assert_not_called()
+
     def test_screen_preserves_explicit_openai_base_url_without_openai_channel(self) -> None:
         config = Config(
             alphasift_enabled=True,

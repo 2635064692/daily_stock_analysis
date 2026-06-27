@@ -1821,6 +1821,9 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
         source: str = "akshare",
         retries: int = 2,
     ) -> Any:
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source == "tencent":
+            return original_fetch(code, lookback_days=lookback_days, source=source, retries=retries)
         try:
             dsa_df, dsa_source = get_dsa_daily_history(code, lookback_days=lookback_days)
             normalized = _normalize_dsa_daily_history(dsa_df)
