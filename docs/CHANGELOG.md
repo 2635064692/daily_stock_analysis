@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 避免 runtime scheduler 重建定时任务时重复立即运行事件监控，减少重复告警和后台任务状态丢失。
 - [修复] Web/API runtime scheduler 接管 `--serve --schedule` 后保留 `--dry-run`、`--no-notify` 等启动参数语义。
 - [改进] Web 历史报告详情不再内嵌展示 AI 建议卡片，结构化决策信号集中在 AI 建议页查询，并保留按来源报告 ID 筛选或 URL 参数精确定位入口。
+- [修复] AlphaSift 选股在 `DAILY_SOURCE=tencent` 下不再用 DSA 历史装载链路覆盖 AlphaSift 原生 Tencent 日线，修复 `volume_breakout` 等依赖当日突破特征的策略被 `No candidates after daily hard filter` 误清空的问题。
+- [测试] 为 AlphaSift DSA 日线桥接增加 `source=tencent` 旁路回归测试，防止后续重新引入日线契约漂移。
+- [文档] 补充 AlphaSift 日线桥接边界：显式 `tencent` 源保留 AlphaSift 原生日线实现，不再走 DSA 历史覆盖。
+- [新功能] 新闻搜索新增 Grok provider，通过 OpenAI 兼容接口实时联网检索并以 JSON 数组结构化返回；支持 `GROK_API_KEYS`（多 key）、`GROK_BASE_URL`、`GROK_MODEL`（默认 `grok-4.20-fast`），并接入主流程、大盘复盘和搜索服务工厂。
+- [文档] 在 README、full-guide、DEPLOY（中英双语）搜索服务配置表补充 Grok provider 说明。
+- [测试] 为 Grok 搜索 provider 增加解析与重试行为单元测试。
 
 ## [3.23.0] - 2026-06-20
 
