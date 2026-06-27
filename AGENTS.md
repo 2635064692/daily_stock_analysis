@@ -17,7 +17,7 @@
 - 远端源码落点：宿主机 `/home/haizh/dsa-src`（git clone 得到，见 §5.1）。
 - 服务运行容器：`dsa-server`，镜像 `zhulinsen/daily_stock_analysis:latest`，对外端口 `8001`，容器内工作目录 `/app`，运行命令 `python main.py --serve-only --host 0.0.0.0 --port 8001`。
 - **远端访问 github.com 必须经代理 `http://127.0.0.1:7897`**（直连不通）；`git clone`/`pull` 需带 `-c http.proxy=http://127.0.0.1:7897`。
-- `dsa-server` 是 Docker Hub 发布镜像、**仅挂载后端 Python 源码**（`src/`、`api/`、`main.py` 等，落点 `/home/haizh/dsa-src`），**保留镜像内前端 `static/`**；远端 `git pull` 拉新分支后重启即用最新源码逻辑；依赖位于镜像 `/usr/local/lib`（site-packages），不受源码挂载影响（冷启动需 `FASTAPI_STARTUP_TIMEOUT` 默认 15s，见 §5.3）。镜像内仍**默认无 `tests/`、`scripts/`、`pytest`、`flake8`**（随源码挂载进入，但宿主机/临时挂载容器才是单测/静态检查的执行位置，见 §5.2）。
+- `dsa-server` 是 Docker Hub 发布镜像、**整体挂载宿主机源码到 `/app`**（落点 `/home/haizh/dsa-src`）；远端 `git pull` 拉新分支后重启即用最新源码逻辑；依赖位于镜像 `/usr/local/lib`（site-packages），不受 `/app` 挂载影响（冷启动需 `FASTAPI_STARTUP_TIMEOUT` 默认 15s，见 §5.3）。前端 `static/` 需在宿主机用 nvm 环境 build（`npm ci && npm run build`，产物输出到 `dsa-src/static/`），纯后端改动无需重建前端。镜像内仍**默认无 `tests/`、`scripts/`、`pytest`、`flake8`**（随源码挂载进入，但宿主机/临时挂载容器才是单测/静态检查的执行位置，见 §5.2）。
 
 ## 3. Git 约束（强制）
 
@@ -86,27 +86,18 @@ docker run --rm -v /home/haizh/dsa-src:/app -w /app \
 
 ### 5.3 dsa-server 服务验收（运行 / 接口验证）
 
-dsa-server **仅挂载后端 Python 源码**（`src/`、`api/`、`bot/`、`data_provider/`、`strategies/`、`templates/`、`main.py`、`server.py`、`webui.py`，落点 `/home/haizh/dsa-src`），**保留镜像内前端 `static/`**；跑的是挂载源码而非镜像内代码。远端 `git pull`（§5.1，7897 代理）拉新分支后，重启 dsa-server 即用最新源码逻辑，**无需等 CI 重建镜像**。镜像依赖位于 `/usr/local/lib`（site-packages），不受源码挂载影响；仅当新代码引入新的 pip 依赖时，才需 `docker pull` 新镜像。
+dsa-server **整体挂载宿主机源码到 `/app`**（落点 `/home/haizh/dsa-src`），跑的是挂载源码而非镜像内代码；远端 `git pull`（§5.1，7897 代理）拉新分支后，重启 dsa-server 即用最新源码逻辑，**无需等 CI 重建镜像**。镜像依赖位于 `/usr/local/lib`（site-packages），不受 `/app` 挂载影响；仅当新代码引入新的 pip 依赖时，才需 `docker pull` 新镜像。
 
-> ⚠️ **只挂后端源码、不要整体挂 `/app`**：整体 `-v /home/haizh/dsa-src:/app` 会丢失镜像内预构建的前端 `static/`，导致 FastAPI 启动加载前端资源失败。
+> ⚠️ **整体挂载会覆盖镜像内前端 `static/`**：首次挂载或前端代码有变动时，需先在宿主机 build 前端（`source ~/.nvm/nvm.sh && cd /home/haizh/dsa-src/apps/dsa-web && npm ci && npm run build`），产物自动输出到 `/home/haizh/dsa-src/static/`，随整体挂载进入容器。纯后端改动无需重新 build 前端。
 
 ```bash
-# 更新源码并重启（先 git pull 拉新分支，再重启挂载后端源码的 dsa-server）
+# 更新源码并重启（先 git pull 拉新分支，再重启挂载源码的 dsa-server）
 cd /home/haizh/dsa-src && \
   git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 pull --ff-only
 docker stop dsa-server && docker rm dsa-server
 docker run -d \
   --name dsa-server --restart unless-stopped -p 8001:8001 \
-  -e FASTAPI_STARTUP_TIMEOUT=15 \
-  -v /home/haizh/dsa-src/src:/app/src \
-  -v /home/haizh/dsa-src/api:/app/api \
-  -v /home/haizh/dsa-src/bot:/app/bot \
-  -v /home/haizh/dsa-src/data_provider:/app/data_provider \
-  -v /home/haizh/dsa-src/strategies:/app/strategies \
-  -v /home/haizh/dsa-src/templates:/app/templates \
-  -v /home/haizh/dsa-src/main.py:/app/main.py \
-  -v /home/haizh/dsa-src/server.py:/app/server.py \
-  -v /home/haizh/dsa-src/webui.py:/app/webui.py \
+  -v /home/haizh/dsa-src:/app \
   -v /home/haizh/opensource/daily_stock_analysis/data:/app/data \
   -v /home/haizh/opensource/daily_stock_analysis/logs:/app/logs \
   -v /home/haizh/opensource/daily_stock_analysis/.env:/app/.env \

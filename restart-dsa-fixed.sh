@@ -1,5 +1,12 @@
 #!/bin/bash
-# DSA 服务重启脚本（包含 efinance 权限修复）
+# DSA 服务重启脚本（整体挂载源码 + efinance 权限修复）
+#
+# 前置条件：
+#   1. /home/haizh/dsa-src 是已完成 git clone/pull 的源码 checkout
+#   2. 首次启动或前端有改动时，先 build 前端：
+#      source ~/.nvm/nvm.sh && cd /home/haizh/dsa-src/apps/dsa-web && npm ci && npm run build
+#      （产物自动输出到 /home/haizh/dsa-src/static/，随整体挂载进入容器）
+#   3. 纯后端改动只需 git pull 后重跑本脚本，无需重新 build 前端
 
 set -e
 
@@ -8,26 +15,16 @@ docker stop dsa-server 2>/dev/null || true
 docker rm dsa-server 2>/dev/null || true
 
 echo ""
-echo "=== 启动新容器（仅挂载后端源码 + 权限修复）==="
-# 仅挂载后端 Python 源码（落点 /home/haizh/dsa-src，git clone/pull 得到），保留镜像内前端 static/。
-# 远端 git pull 拉新分支后，重启即用最新源码逻辑，无需等 CI 重建镜像。
-# 镜像依赖位于 /usr/local/lib（site-packages），不受源码挂载影响，无需重新安装（新增 pip 依赖除外）。
-# FASTAPI_STARTUP_TIMEOUT=15：挂载源码首次冷 import api.app 较慢，需 > 默认 3s 的余量。
-# data/logs/.env 挂载自运行态目录（/home/haizh/opensource/daily_stock_analysis）。
+echo "=== 启动新容器（整体挂载源码到 /app + 权限修复）==="
+# 整体挂载 /home/haizh/dsa-src:/app，git pull 后重启即用最新代码，无需等 CI 重建镜像。
+# data/logs/.env 子路径挂载覆盖整体挂载中的对应目录，指向运行态目录。
+# 镜像依赖位于 /usr/local/lib（site-packages），不受 /app 挂载影响。
+# FASTAPI_STARTUP_TIMEOUT 代码默认已是 15s（挂载源码冷启动约需 9s），无需显式传入。
 docker run -d \
   --name dsa-server \
   --restart unless-stopped \
   -p 8001:8001 \
-  -e FASTAPI_STARTUP_TIMEOUT=15 \
-  -v /home/haizh/dsa-src/src:/app/src \
-  -v /home/haizh/dsa-src/api:/app/api \
-  -v /home/haizh/dsa-src/bot:/app/bot \
-  -v /home/haizh/dsa-src/data_provider:/app/data_provider \
-  -v /home/haizh/dsa-src/strategies:/app/strategies \
-  -v /home/haizh/dsa-src/templates:/app/templates \
-  -v /home/haizh/dsa-src/main.py:/app/main.py \
-  -v /home/haizh/dsa-src/server.py:/app/server.py \
-  -v /home/haizh/dsa-src/webui.py:/app/webui.py \
+  -v /home/haizh/dsa-src:/app \
   -v /home/haizh/opensource/daily_stock_analysis/data:/app/data \
   -v /home/haizh/opensource/daily_stock_analysis/logs:/app/logs \
   -v /home/haizh/opensource/daily_stock_analysis/.env:/app/.env \
