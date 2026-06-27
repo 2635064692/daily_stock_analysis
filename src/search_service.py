@@ -2488,9 +2488,9 @@ class SearchService:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 3. Grok（实时联网搜索，LLM 结构化返回）
+        # 3. Grok（实时联网搜索，LLM 结构化返回）—— insert(0) 使其成为首选 provider
         if grok_keys:
-            self._providers.append(GrokSearchProvider(grok_keys, base_url=grok_base_url, model=grok_model))
+            self._providers.insert(0, GrokSearchProvider(grok_keys, base_url=grok_base_url, model=grok_model))
             logger.info(f"已配置 Grok 搜索，共 {len(grok_keys)} 个 API Key")
 
         # 4. Brave Search（隐私优先，全球覆盖）

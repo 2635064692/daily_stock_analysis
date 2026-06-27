@@ -7,6 +7,7 @@ The live test is marked @pytest.mark.network and skipped in CI.
 """
 
 import json
+import os
 import sys
 import unittest
 from io import BytesIO
@@ -23,8 +24,9 @@ if "newspaper" not in sys.modules:
 
 from src.search_service import GrokSearchProvider, SearchService
 
-_BASE_URL = "http://claw.592121.xyz/v1"
-_API_KEY = "sk-kQKMTKyEQA7X6eZ_wHbsGtoNbrfoc6T3KNWX2kgeA1rRmljOKVw8KA9U6rE"
+# Offline tests mock requests.post and never hit the network, so dummy values suffice.
+_BASE_URL = "http://offline-test.example/v1"
+_API_KEY = "sk-test-offline-key-not-real"
 _MODEL = "grok-4.20-fast"
 
 
@@ -287,9 +289,16 @@ class TestGrokSearchProviderLive(unittest.TestCase):
     def _provider(self):
         return GrokSearchProvider([_API_KEY], base_url=_BASE_URL, model=_MODEL)
 
+    @unittest.skipUnless(
+        os.getenv("GROK_API_KEYS") and os.getenv("GROK_BASE_URL"),
+        "Set GROK_API_KEYS and GROK_BASE_URL to run the live Grok test",
+    )
     def test_live_search_returns_results(self):
-        p = self._provider()
-        resp = p._do_search("贵州茅台 600519 股票 最新消息", _API_KEY, max_results=3, days=7)
+        live_key = os.getenv("GROK_API_KEYS").split(",")[0].strip()
+        live_base = os.getenv("GROK_BASE_URL").rstrip("/")
+        live_model = os.getenv("GROK_MODEL", _MODEL)
+        p = GrokSearchProvider([live_key], base_url=live_base, model=live_model)
+        resp = p._do_search("贵州茅台 600519 股票 最新消息", live_key, max_results=3, days=7)
         print(f"\n[Live] success={resp.success}, count={len(resp.results)}, error={resp.error_message}")
         for r in resp.results:
             print(f"  - {r.title} | {r.published_date} | {r.url}")
