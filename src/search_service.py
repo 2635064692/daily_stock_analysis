@@ -11,6 +11,7 @@ A股自选股智能分析系统 - 搜索服务模块
 4. 搜索结果缓存和格式化
 """
 
+import json
 import logging
 import re
 import threading
@@ -283,6 +284,176 @@ class BaseSearchProvider(ABC):
         """
         return self._execute_search(query, max_results=max_results, days=days)
 
+
+
+class GrokSearchProvider(BaseSearchProvider):
+    """
+    Grok 搜索引擎
+
+    通过 OpenAI 兼容接口调用 Grok，要求其联网检索并以 JSON 数组返回结果。
+    每个元素包含 title / content / sourceUrl / publishedDate 四个字段。
+    """
+
+    _SYSTEM_PROMPT = """# Core Instruction
+
+1. User needs may be vague. Think divergently, infer intent from multiple angles, and leverage full conversation context to progressively clarify their true needs.
+2. **Breadth-First Search**—Approach problems from multiple dimensions. Brainstorm 5+ perspectives and execute parallel searches for each. Consult as many high-quality sources as possible before responding.
+3. **Depth-First Search**—After broad exploration, select ≥2 most relevant perspectives for deep investigation into specialized knowledge.
+4. **Evidence-Based Reasoning & Traceable Sources**—Every claim must be followed by a citation (`citation_card` format). More credible sources strengthen arguments. If no references exist, remain silent.
+5. Before responding, ensure full execution of Steps 1–4.
+
+---
+
+# Search Instruction
+
+1. Think carefully before responding—anticipate the user's true intent to ensure precision.
+2. Verify every claim rigorously to avoid misinformation.
+3. Follow problem logic—dig deeper until clues are exhaustively clear. If a question seems simple, still infer broader intent and search accordingly. Use multiple parallel tool calls per query and ensure answers are well-sourced.
+4. Search in English first (prioritizing English resources for volume/quality), but switch to Chinese if context demands.
+5. Prioritize authoritative sources: Wikipedia, academic databases, books, reputable media/journalism.
+6. Favor sharing in-depth, specialized knowledge over generic or common-sense content.
+
+---
+
+# Output Style
+
+0. **直接返回 JSON 数组**——无任何前后缀文字、无 Markdown 包裹、无解释性开场白。
+1. **数组首个元素即最可能的答案**（对应 Core Instruction 中的「先广度后深度」结论）。
+2. **每个数组元素必须为以下结构**：
+{"title":"该条结论的一句话标题（≤30 字）","content":"完整论述正文；内含：① 核心结论 → ② 通俗定义每个技术术语（段后括注）→ ③ 现实类比降维解释 → ④ 统计数据或事实佐证。禁止在 content 中内嵌任何 URL 或链接——来源统一由 sourceUrl 字段携带","sourceUrl":"该条论述的权威来源链接（Wikipedia / 学术库 / 官方文档 / 信誉媒体优先；无来源则该元素不可输出）","publishedDate":"来源发布日期（ISO 8601: YYYY-MM-DD；无法确定时填 null）"}
+3. 每一条元素必须附带一个真实 sourceUrl——无来源 = 该元素被静默丢弃，禁止编造。
+4. title 须自包含完整语义——脱离 content 也能独立理解为一条有效知识。
+5. content 写作规范：
+    - 先摆结论，再展开分析。
+    - 技术术语必须在出现处随即用大白话加注。
+    - 关键概念必须配一个现实世界类比。
+    - 公式用 LaTeX，代码用代码块，均内嵌于 content 字符串内。
+    - 禁止内嵌 URL / 链接——所有来源由 sourceUrl 统一承载，content 保持纯文本论述。
+6. 数组长度：广度视角 ≥ 3 条 + 深度挖掘 ≥ 2 条，合计 ≥ 5 条。
+7. 严格合法 JSON：双引号转义、无尾逗号、无注释——确保 JSON.parse() 可直接消费。"""
+
+    def __init__(self, api_keys: List[str], base_url: str, model: str = "grok-4.20-fast"):
+        super().__init__(api_keys, "Grok")
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+
+    def _build_user_prompt(self, query: str, days: int) -> str:
+        today = date.today().isoformat()
+        return (
+            f"Today is {today}. Search for news from the past {days} days.\n"
+            f"Query: {query}"
+        )
+
+    def _call_stream(self, api_key: str, user_prompt: str, timeout: int = 60) -> str:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": True,
+        }
+        url = f"{self._base_url}/chat/completions"
+        content_parts: List[str] = []
+
+        with requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True) as resp:
+            resp.raise_for_status()
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].lstrip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    if "content" in delta:
+                        content_parts.append(delta["content"])
+                except (json.JSONDecodeError, IndexError):
+                    continue
+
+        return "".join(content_parts)
+
+    def _parse_json_results(self, text: str, max_results: int) -> List[SearchResult]:
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text.rstrip())
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError:
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            if not m:
+                return []
+            try:
+                items = json.loads(m.group())
+            except json.JSONDecodeError:
+                return []
+
+        results = []
+        for item in items[:max_results]:
+            source_url = item.get("sourceUrl") or item.get("url") or ""
+            if not source_url:
+                continue
+            results.append(SearchResult(
+                title=item.get("title", ""),
+                snippet=(item.get("content") or "")[:500],
+                url=source_url,
+                source=self._extract_domain(source_url),
+                published_date=item.get("publishedDate") or item.get("published_date") or None,
+            ))
+        return results
+
+    @staticmethod
+    def _extract_domain(url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc.replace('www.', '')
+            return domain or '未知来源'
+        except Exception:
+            return '未知来源'
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        topic: Optional[str] = None,
+    ) -> SearchResponse:
+        user_prompt = self._build_user_prompt(query, days)
+        last_error: Optional[str] = None
+
+        for attempt in range(3):
+            try:
+                text = self._call_stream(api_key, user_prompt)
+                if not text.strip():
+                    last_error = "empty response"
+                    logger.warning("[Grok] 第 %d 次请求返回空内容，重试", attempt + 1)
+                    continue
+
+                results = self._parse_json_results(text, max_results)
+                logger.info("[Grok] 搜索完成，query='%s'，返回 %d 条结果", query, len(results))
+                return SearchResponse(query=query, results=results, provider=self.name, success=True)
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning("[Grok] 第 %d 次请求失败: %s", attempt + 1, e)
+
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self.name,
+            success=False,
+            error_message=last_error or "unknown error",
+        )
 
 class TavilySearchProvider(BaseSearchProvider):
     """
@@ -2258,6 +2429,9 @@ class SearchService:
         self,
         bocha_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
+        grok_keys: Optional[List[str]] = None,
+        grok_base_url: str = "https://api.x.ai/v1",
+        grok_model: str = "grok-4.20-fast",
         anspire_keys: Optional[List[str]] = None,
         brave_keys: Optional[List[str]] = None,
         serpapi_keys: Optional[List[str]] = None,
@@ -2273,6 +2447,9 @@ class SearchService:
         Args:
             bocha_keys: 博查搜索 API Key 列表
             tavily_keys: Tavily API Key 列表
+            grok_keys: Grok API Key 列表
+            grok_base_url: Grok API base URL
+            grok_model: Grok 模型名称
             anspire_keys: Anspire Search API Key 列表
             brave_keys: Brave Search API Key 列表
             serpapi_keys: SerpAPI Key 列表
@@ -2311,7 +2488,12 @@ class SearchService:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 3. Brave Search（隐私优先，全球覆盖）
+        # 3. Grok（实时联网搜索，LLM 结构化返回）
+        if grok_keys:
+            self._providers.append(GrokSearchProvider(grok_keys, base_url=grok_base_url, model=grok_model))
+            logger.info(f"已配置 Grok 搜索，共 {len(grok_keys)} 个 API Key")
+
+        # 4. Brave Search（隐私优先，全球覆盖）
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
@@ -4448,6 +4630,9 @@ def get_search_service() -> SearchService:
                 _search_service = SearchService(
                     bocha_keys=config.bocha_api_keys,
                     tavily_keys=config.tavily_api_keys,
+                    grok_keys=config.grok_api_keys,
+                    grok_base_url=config.grok_base_url,
+                    grok_model=config.grok_model,
                     anspire_keys=config.anspire_api_keys,
                     brave_keys=config.brave_api_keys,
                     serpapi_keys=config.serpapi_keys,

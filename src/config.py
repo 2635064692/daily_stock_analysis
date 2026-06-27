@@ -704,6 +704,9 @@ class Config:
     bocha_api_keys: List[str] = field(default_factory=list)  # Bocha API Keys
     minimax_api_keys: List[str] = field(default_factory=list)  # MiniMax API Keys
     tavily_api_keys: List[str] = field(default_factory=list)  # Tavily API Keys
+    grok_api_keys: List[str] = field(default_factory=list)  # Grok API Keys
+    grok_base_url: str = "https://api.x.ai/v1"  # Grok API base URL
+    grok_model: str = "grok-4.20-fast"  # Grok model name
     brave_api_keys: List[str] = field(default_factory=list)  # Brave Search API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
@@ -1347,7 +1350,12 @@ class Config:
         
         tavily_keys_str = os.getenv('TAVILY_API_KEYS', '')
         tavily_api_keys = [k.strip() for k in tavily_keys_str.split(',') if k.strip()]
-        
+
+        grok_keys_str = os.getenv('GROK_API_KEYS', '')
+        grok_api_keys = [k.strip() for k in grok_keys_str.split(',') if k.strip()]
+        grok_base_url = os.getenv('GROK_BASE_URL', 'https://api.x.ai/v1').rstrip('/')
+        grok_model = os.getenv('GROK_MODEL', 'grok-4.20-fast')
+
         serpapi_keys_str = os.getenv('SERPAPI_API_KEYS', '')
         serpapi_keys = [k.strip() for k in serpapi_keys_str.split(',') if k.strip()]
 
@@ -1501,6 +1509,9 @@ class Config:
             bocha_api_keys=bocha_api_keys,
             minimax_api_keys=minimax_api_keys,
             tavily_api_keys=tavily_api_keys,
+            grok_api_keys=grok_api_keys,
+            grok_base_url=grok_base_url,
+            grok_model=grok_model,
             brave_api_keys=brave_api_keys,
             serpapi_keys=serpapi_keys,
             searxng_base_urls=searxng_base_urls,

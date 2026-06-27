@@ -60,6 +60,9 @@ def build_market_review_runtime(
         search_service = SearchService(
             bocha_keys=getattr(config, "bocha_api_keys", None),
             tavily_keys=getattr(config, "tavily_api_keys", None),
+            grok_keys=getattr(config, "grok_api_keys", None),
+            grok_base_url=getattr(config, "grok_base_url", "https://api.x.ai/v1"),
+            grok_model=getattr(config, "grok_model", "grok-4.20-fast"),
             anspire_keys=getattr(config, "anspire_api_keys", None),
             brave_keys=getattr(config, "brave_api_keys", None),
             serpapi_keys=getattr(config, "serpapi_keys", None),
