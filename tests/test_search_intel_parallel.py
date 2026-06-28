@@ -156,9 +156,15 @@ def test_failing_dimension_isolated():
     ]
     service = _make_service(providers)
     results = service.search_comprehensive_intel("002043", "兔宝宝", max_searches=6)
-    # Failing dim is dropped; the other 5 remain.
-    assert "risk_check" not in results
-    assert len(results) == 5
+    # BaseSearchProvider.search() traps _do_search exceptions and returns a
+    # success=False response, so the failing dim is retained as a failure
+    # entry (not dropped) — and it must NOT block the other 5 dims.
+    assert len(results) == 6
+    assert results["risk_check"].success is False
+    assert len(results["risk_check"].results) == 0
+    healthy = {n: r for n, r in results.items() if n != "risk_check"}
+    assert len(healthy) == 5
+    assert all(r.success for r in healthy.values())
 
 
 # ---------------------------------------------------------------------------
