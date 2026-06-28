@@ -16,6 +16,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -4124,7 +4125,6 @@ class SearchService:
             {维度名称: SearchResponse} 字典
         """
         results = {}
-        search_count = 0
 
         is_foreign = self._is_foreign_stock(stock_code)
         is_index_etf = self.is_index_or_etf(stock_code, stock_name)
@@ -4252,21 +4252,18 @@ class SearchService:
             provider_max_results,
         )
         
-        # 轮流使用不同的搜索引擎
-        provider_index = 0
-        
-        for dim in search_dimensions:
-            if search_count >= max_searches:
-                break
-            
-            # 选择搜索引擎（轮流使用）
-            available_providers = [p for p in self._providers if p.is_available]
-            if not available_providers:
-                break
-            
-            provider = available_providers[provider_index % len(available_providers)]
-            provider_index += 1
-            
+        # 维度→provider 固定分配（轮询），维度间并行执行
+        available_providers = [p for p in self._providers if p.is_available]
+        if not available_providers:
+            return results
+
+        prefer_chinese = self._should_prefer_chinese_news(stock_code, stock_name)
+        dim_assignments = [
+            (dim, available_providers[idx % len(available_providers)])
+            for idx, dim in enumerate(search_dimensions[:max_searches])
+        ]
+
+        def _run_one_dim(dim, provider):
             request_days = (
                 self.ANALYTICAL_INTEL_LOOKBACK_DAYS
                 if dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS
@@ -4317,7 +4314,7 @@ class SearchService:
                 filtered_response,
                 stock_code=stock_code,
                 stock_name=stock_name,
-                prefer_chinese=self._should_prefer_chinese_news(stock_code, stock_name),
+                prefer_chinese=prefer_chinese,
                 max_results=provider_max_results,
                 log_scope=f"{stock_code}:{provider.name}:{dim['name']}:rank",
             )
@@ -4329,9 +4326,7 @@ class SearchService:
                 filtered_response,
                 max_results=target_per_dimension,
             )
-            results[dim['name']] = filtered_response
-            search_count += 1
-            
+
             if response.success:
                 logger.info(
                     "[情报搜索] %s: 原始=%s条, 过滤后=%s条",
@@ -4341,10 +4336,26 @@ class SearchService:
                 )
             else:
                 logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
-            
-            # 短暂延迟避免请求过快
-            time.sleep(0.5)
-        
+
+            return dim['name'], filtered_response
+
+        # 每维度一线程并行；失败维度不降级，异常被捕获记录
+        collected: Dict[str, 'SearchResponse'] = {}
+        with ThreadPoolExecutor(max_workers=max(1, len(dim_assignments))) as pool:
+            futures = {pool.submit(_run_one_dim, dim, prov): dim for dim, prov in dim_assignments}
+            for fut in as_completed(futures):
+                dim = futures[fut]
+                try:
+                    name, resp = fut.result()
+                    collected[name] = resp
+                except Exception as exc:
+                    logger.warning("[情报搜索] %s: 维度执行异常 - %s", dim.get('desc'), exc)
+
+        # 按维度原顺序回填，保证 dict 顺序与串行一致
+        for dim, _ in dim_assignments:
+            if dim['name'] in collected:
+                results[dim['name']] = collected[dim['name']]
+
         return results
     
     def format_intel_report(self, intel_results: Dict[str, SearchResponse], stock_name: str) -> str:
