@@ -1,0 +1,16 @@
+{
+  "id": "spi-rotation-pricing-impl",
+  "title": "SPI 板块轮动指标迁移 + 轮动优化 + 比价系统（三阶段实施）",
+  "status": "in_progress",
+  "strategy": "guided-develop",
+  "currentPhase": "1",
+  "taskPhase": "1",
+  "nextAction": "阶段1前置门槛：任务1.0 远端选股宝smoke + 1.0a EMA黄金样例对表",
+  "gate": "编码前硬门槛（1.0+1.0a）未通过前不得进入1.1编码",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "spi-rotation-pricing-impl",
+  "createdAt": "2026-07-02T12:45:43Z",
+  "spec": "docs/product-specs/spi-rotation-pricing-requirement-boundary.md",
+  "phases": "阶段1=SPI v1迁移; 阶段2=SPI v2+轮动闭环; 阶段3=比价系统",
+  "reviewRef": "§29 多模型审查(Gemini+Codex)已闭环, 置信度High"
+}
