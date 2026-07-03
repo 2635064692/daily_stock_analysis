@@ -1,3 +1,0 @@
-{"_example": "Fill with {\"file\": \"path\", \"reason\": \"why\"}. Seed rows are skipped."}
-{"file": "docs/product-specs/spi-rotation-pricing-requirement-boundary.md", "reason": "需求边界+三阶段详细规划+§29审查修订, 实施的唯一权威依据"}
-{"file": "docs/histories/2026-07-02-spi-plate-rotation-indicator.md", "reason": "Java侧SPI算法逐行追溯(emaForSPI/calStockSPI/calSPI/spiTime), 迁移保真基准"}

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新闻搜索新增 Grok provider，通过 OpenAI 兼容接口实时联网检索并以 JSON 数组结构化返回；支持 `GROK_API_KEYS`（多 key）、`GROK_BASE_URL`、`GROK_MODEL`（默认 `grok-4.20-fast`），并接入主流程、大盘复盘和搜索服务工厂。
 - [文档] 在 README、full-guide、DEPLOY（中英双语）搜索服务配置表补充 Grok provider 说明。
 - [测试] 为 Grok 搜索 provider 增加解析与重试行为单元测试。
+- [文档] 同步 SPI 规划文档：阶段1权威方案改为 `akshare` 申万一级行业指数直算 SPI，不再将选股宝成分股聚合作为阶段1实施路径。
 
 ## [3.23.0] - 2026-06-20
 

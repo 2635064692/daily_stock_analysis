@@ -106,6 +106,18 @@ def test_get_index_kline_respects_back_count():
         assert len(result) == 5
 
 
+def test_get_index_kline_filters_by_end_date():
+    adapter = AkshareSwAdapter()
+    with patch.object(adapter._ak, "index_hist_sw") as mock_fn:
+        mock_fn.return_value = _make_index_hist_df(5)
+        result = adapter.get_index_kline("801010", end_date=pd.Timestamp("2026-07-03").date())
+        assert [item["date"] for item in result] == [
+            "2026-07-01",
+            "2026-07-02",
+            "2026-07-03",
+        ]
+
+
 def test_get_index_kline_ascending_date_order():
     adapter = AkshareSwAdapter()
     with patch.object(adapter._ak, "index_hist_sw") as mock_fn:

@@ -2,7 +2,10 @@
 """SPI-private akshare Shenwan adapter — no BaseFetcher inheritance, no DataFetcherManager."""
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
+
+import pandas as pd
 
 
 class AkshareSwAdapter:
@@ -37,16 +40,24 @@ class AkshareSwAdapter:
         ]
 
     def get_index_kline(
-        self, board_id: str, back_count: int = 300
+        self,
+        board_id: str,
+        back_count: int = 300,
+        end_date: date | None = None,
     ) -> list[dict[str, Any]]:
         df = self._ak.index_hist_sw(symbol=board_id, period="day")
         if df is None or df.empty:
             return []
-        df = df.tail(back_count).copy()
-        df["日期"] = df["日期"].astype(str)
+        df = df.copy()
+        df["日期"] = pd.to_datetime(df["日期"]).dt.date
+        if end_date is not None:
+            df = df[df["日期"] <= end_date]
+            if df.empty:
+                return []
+        df = df.tail(back_count)
         return [
             {
-                "date": row["日期"],
+                "date": row["日期"].isoformat(),
                 "close": float(row["收盘"]),
                 "open": float(row["开盘"]),
                 "high": float(row["最高"]),

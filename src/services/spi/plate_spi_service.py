@@ -13,6 +13,7 @@ from src.services.spi.spi_time import spi_time
 from src.repositories.plate_spi_repo import PlateSpiRepository
 
 logger = logging.getLogger(__name__)
+MIN_SPI_HISTORY = 233
 
 
 class PlateSpiService:
@@ -30,13 +31,17 @@ class PlateSpiService:
                           board_name: str = "") -> tuple:
         """Returns (board_id_int, spi, board_name, coverage)."""
         board_id_int = int(board_id_str)
-        klines = self.adapter.get_index_kline(board_id_str, back_count=300)
+        klines = self.adapter.get_index_kline(
+            board_id_str,
+            back_count=300,
+            end_date=anchor_date,
+        )
         if not klines:
             return (board_id_int, -1, board_name, 0.0)
 
         closes = [k["close"] for k in klines]
         spi = cal_index_spi(closes)
-        coverage = 1.0 if len(closes) >= 233 else len(closes) / 233.0
+        coverage = 1.0 if len(closes) >= MIN_SPI_HISTORY else len(closes) / MIN_SPI_HISTORY
         return (board_id_int, spi, board_name, coverage)
 
     # ------------------------------------------------------------------

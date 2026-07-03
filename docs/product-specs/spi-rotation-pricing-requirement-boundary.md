@@ -3,6 +3,7 @@
 
 > 来源：creative-explore 会话，基于 b-quant-chan Java 侧 SPI 实现迁移 + 会话 `e1883821` 规划能力。
 > 范围：**纯后端**。三阶段分期交付。
+> **2026-07 实现同步说明**：阶段1当前已落地方案为 **`akshare` 申万一级行业指数直算 SPI**（31 个行业指数 close 序列 → `cal_index_spi`），不再以“选股宝成分股聚合”作为阶段1权威方案；成分股 point-in-time 与板块内比价仍保留在阶段2/3。
 
 ---
 
@@ -18,12 +19,12 @@ DSA（Python，FastAPI）当前只有个股级分析与当日板块涨跌幅排�
 
 | # | Requirement | Priority | Source |
 |---|---|---|---|
-| R1 | 新建**选股宝数据源适配层**：板块详情 / 板块成分股（板块→成分股方向）/ 板块历史 | P0 | S13（用户指定选股宝） |
-| R2 | 复刻 SPI v1 计算：8 条斐波那契 EMA(5,13,21,34,55,89,144,233) + 收盘价站上计数(0~8) + 板块成分股均值（EMA，日线频率） | P0 | R1/A1 |
-| R3 | SPI 快照表：(板块,交易日) upsert 幂等；保留 -1 无效板块（无成分股/节假日）哨兵语义及下游过滤 | P0 | S7/S3 |
+| R1 | 新建 **SPI 私有行业指数适配层**：读取 `akshare` 申万一级行业列表与行业指数历史日线（`sw_index_first_info` / `index_hist_sw`），不接入全局 `DataFetcherManager` | P0 | 当前实现 |
+| R2 | 复刻 SPI v1 核心计算：8 条斐波那契 EMA(5,13,21,34,55,89,144,233) + 收盘价站上计数(0~8)，**直接以板块/行业指数 close 序列计算 SPI** | P0 | R1/A1 |
+| R3 | SPI 快照表：(板块,交易日) upsert 幂等；保留 -1 无效板块（无足够指数历史/锚点无可用数据）哨兵语义及下游过滤 | P0 | S7/S3 |
 | R4 | 排名查询：按板块 SPI 降序取 Top N（复刻 `findMostLimit` 语义），返回 N 日 SPI 时序 | P0 | 用户 M2 |
 | R5 | 异步回算任务：日终刷新 + 历史补算（fire-and-forget）+ 任务状态机(pending/running/done/failed) + 进度查询接口 | P0 | S6/A3 |
-| R6 | SPI 计算并行化（板块级并发），日线**实时拉取不缓存** | P0 | S10/S11 |
+| R6 | SPI 计算并行化（板块级并发），行业指数历史按 `anchor_date` 截止实时拉取；阶段1**不走成分股逐股缓存链路** | P0 | S10/S11 |
 | R7 | 集成边界：`get_sector_rankings`/`get_belong_boards`/`capital_flow_context` **只读复用**，不侵入现有调用方 | P0 | S14 |
 
 #### 阶段 2：SPI 板块轮动改造优化（SPI v2 + 轮动闭环）
@@ -78,7 +79,7 @@ DSA（Python，FastAPI）当前只有个股级分析与当日板块涨跌幅排�
 
 | # | Question | Blocking? | Suggested Resolution Path |
 |---|---|---|---|
-| Q1 | 选股宝接口的认证/限流/字段口径（板块ID体系、成分股返回结构、历史K线接口）在 DSA 环境是否可达？ | **Yes（阶段1启动前）** | 阶段1首任务：选股宝接口连通性 + 字段映射探查（参考 Java 侧 `xuangubao` 网关实现） |
+| Q1 | 选股宝接口的认证/限流/字段口径（板块ID体系、成分股返回结构、历史K线接口）在 DSA 环境是否可达？ | **No（不再阻塞阶段1）** | 阶段1已改为 `akshare` 行业指数直算；若阶段2/3 重启成分股链路，再单独验证选股宝契约 |
 | Q2 | SPI v2 因子权重初始值如何确定（无回测约束下）？ | No（阶段2内决） | 用户/经验设定 + 因子可插拔以便后续调整（S17 已保证可调） |
 | Q3 | 选股宝与 DSA 现有 akshare/efinance 板块集合是否需要做板块名映射互通？ | No | DSA 内部自洽即可（用户已确认）；若轮动结果需与现有个股分析联动再定 |
 
@@ -116,18 +117,18 @@ DSA（Python，FastAPI）当前只有个股级分析与当日板块涨跌幅排�
 
 | 阶段 | 交付 | 关键复用 | 关键重建 | 阻塞项 |
 |---|---|---|---|---|
-| **1. SPI 原逻辑迁移** | 选股宝适配层 + SPI v1 计算 + 快照表 + 排名查询 + 异步回算任务 + 并行 | 任务队列、SQLAlchemy、Repository、fallback熔断、API异步状态、`get_belong_boards`(校验) | 选股宝数据源、板块成分股主链路、SPI 快照表、回算任务 | Q1（选股宝连通性） |
+| **1. SPI 原逻辑迁移** | `akshare` 申万一级行业指数适配 + SPI v1 计算 + 快照表 + 排名查询 + 异步回算任务 + 并行 | 任务队列、SQLAlchemy、Repository、API 异步状态 | 行业指数数据源、SPI 快照表、回算任务 | 无 |
 | **2. SPI 轮动改造优化** | SPI v2 因子(方向/分离度/排列/压缩) + 可插拔权重模型 + 轮动闭环(观察池/入场/出场) + point-in-time 成分股 | 阶段1全部产出 | v2 因子模块、轮动信号引擎、成分股历史锁定 | 无 |
-| **3. 比价系统** | 板块内个股比价 + CMF/资金流代理 + point-in-time 比价快照 | `capital_flow_context`、阶段1选股宝成分股 | 比价计算、比价快照表 | 无 |
+| **3. 比价系统** | 板块内个股比价 + CMF/资金流代理 + point-in-time 比价快照 | `capital_flow_context`、阶段1板块 SPI/行业指数基础、阶段2 成分股快照 | 比价计算、比价快照表 | 无 |
 
 ---
 ---
 
 # 阶段 1 详细规划：SPI 原逻辑迁移
 
-> 依据：Java 侧 `XGBApiGateway` / `PlateSingleIndicatorsEntity` / `Indicators.emaForSPI` 源码逐行追溯 +
-> DSA 现有 `DataFetcherManager` / `AnalysisTaskQueue` / `StockRepository` / `declarative_base` 范式。
-> **Q1（选股宝连通性）已解**：4 接口 URL/参数/字段已确认，Java SmokeTest 已验证可达，DSA 用 `requests` 复刻即可。
+> 依据：Java 侧 `Indicators.emaForSPI` / `PlateSingleIndicatorsEntity` 核心指标语义 + DSA 现有 `AnalysisTaskQueue` /
+> `declarative_base` / `trading_calendar` 范式。
+> **当前权威实现**：阶段1使用 `akshare` 申万一级行业指数直算 SPI；早期选股宝成分股迁移方案仅保留为后续阶段参考，不再作为阶段1实施前提。
 
 ---
 
@@ -138,10 +139,6 @@ DSA（Python，FastAPI）当前只有个股级分析与当日板块涨跌幅排�
 
 ```
 daily_stock_analysis/
-├── data_provider/
-│   ├── xuangubao_fetcher.py        【新建】选股宝数据源：板块详情/成分/历史K线/个股K线
-│   └── base.py                     【改 1 处】DataFetcherManager._init_default_fetchers 注册 XGBFetcher
-│
 ├── src/
 │   ├── storage.py                  【新增 2 表】PlateSpiSnapshot / SpiBackfillTaskRun（declarative_base 范式）
 │   │
@@ -149,28 +146,27 @@ daily_stock_analysis/
 │   │   └── plate_spi_repo.py       【新建】PlateSpiRepository：upsert快照 / Top N 排名 / N日时序 / 任务记录CRUD
 │   │
 │   ├── services/
-│   │   ├── spi_calculator.py       【新建】SPI 纯算法：ema_for_spi(8条斐波那契EMA) / cal_stock_spi / cal_board_spi
-│   │   └── plate_spi_service.py    【新建】业务编排：单板块SPI / 全量并行计算 / 日终刷新 / 历史补算
+│   │   └── spi/
+│   │       ├── akshare_sw_adapter.py 【新建】SPI 私有 adapter：申万一级行业列表 + 行业指数历史日线
+│   │       ├── spi_calculator.py     【新建】SPI 纯算法：ema_for_spi / cal_stock_spi / cal_index_spi
+│   │       ├── spi_time.py           【新建】交易日锚点与 trading-date 迭代
+│   │       ├── plate_spi_service.py  【新建】业务编排：单板块 SPI / 全量并行计算
+│   │       └── spi_task_runner.py    【新建】异步回算 / 日终刷新 / SPI 任务互斥
 │   │
-│   ├── scheduler.py                【改 1 处】注册"日终 SPI 刷新"定时任务（复用现有 scheduler 范式）
-│   │
-│   └── utils/
-│       └── spi_time.py             【新建】spi_time(date)：≥15:00 取当日15:00 否则前一交易日15:00（锚点）
+│   └── main.py                     【改 1 处】在 `scheduled_task()` 主分析后追加 SPI 日终刷新
 │
 ├── api/v1/endpoints/
 │   └── plate_spi.py                【新建】POST /refresh（触发日终）/ POST /backfill（触发历史回算）/
 │                                          GET /status/{task_id}（复用 AnalysisTaskQueue）/ GET /rankings（Top N）
 │
 ├── tests/
-│   ├── test_spi_calculator.py      【新建】EMA/单股SPI/板块SPI 纯算法单测（离线，mock close 序列）
-│   ├── test_xuangubao_fetcher.py   【新建】选股宝4接口字段映射单测（mock requests）
-│   └── test_plate_spi_service.py   【新建】并行计算 + upsert 幂等 + 任务状态 单测
-│
-└── alembic/  (或 storage.py 内建迁移)
-    └── 新增 PlateSpiSnapshot / SpiBackfillTaskRun 建表脚本
+│   ├── test_spi_calculator.py      【新建】EMA / index SPI 纯算法单测
+│   ├── test_akshare_sw_adapter.py  【新建】申万一级 / 行业指数字段映射单测
+│   ├── test_plate_spi_service.py   【新建】并行计算 / anchor_date / upsert 幂等 单测
+│   └── test_spi_task_runner.py     【新建】交易日回算 / 任务互斥 / 元数据落库 单测
 ```
 
-**改动统计**：新建 9 文件，改 3 处（base.py 注册、storage.py 加表、scheduler.py 加任务）。**不触碰** `get_sector_rankings`/`get_belong_boards`/`capital_flow_context`。
+**改动统计（按当前实现）**：以 `src/services/spi/` 新建为主，改动集中在 `storage.py` / `api/v1/router.py` / `api/v1/endpoints/plate_spi.py` / `main.py`。**不触碰** `get_sector_rankings`/`get_belong_boards`/`capital_flow_context` / `data_provider/base.py`。
 
 ---
 
@@ -179,25 +175,26 @@ daily_stock_analysis/
 ### 10.1 写流（计算 → 落库）
 
 ```
-选股宝 API (flash-api.xuangubao.cn / api-ddc-wscn.xuangubao.cn)
+AkShare 申万行业接口
    │
-   │  ① plate/rank          → 全量板块ID列表 [{id, name, ...}]
-   │  ② plate/plate_set?id= → 单板块详情 + 成分股列表 [stock_code...]
-   │  ③ market/kline        → 成分股日K线（fields: close_px 等八字段，period DAY）
+   │  ① sw_index_first_info()   → 申万一级行业列表 [{行业代码, 行业名称, 成份个数}]
+   │  ② index_hist_sw(symbol)   → 单行业指数历史日线（开高低收）
    ▼
-XuangubaoFetcher (data_provider/xuangubao_fetcher.py)
-   │  统一字段映射：close_px → close，prod_code → symbol，按 BaseFetcher 规范
+AkshareSwAdapter (src/services/spi/akshare_sw_adapter.py)
+   │  统一字段映射：`801010.SI` → `801010`，`日期` → `date`，`收盘` → `close`
    ▼
 PlateSpiService.plate_spi_snapshot(board_id, trade_date)
    │  并行（ThreadPoolExecutor，板块级并发）
-   │  对每个成分股：
+   │  对每个行业指数：
+   │    get_index_kline(board_id, back_count=300, end_date=anchor_date)
+   │       → 截止 anchor_date 的 close 序列
    │    SpiCalculator.ema_for_spi(close_series)
    │       → {5,13,21,34,55,89,144,233: ema_value}（数据不足该周期则跳过）
-   │    SpiCalculator.cal_stock_spi(last_close, ema_map)
-   │       → 整数 0~8（收盘价站上几条 EMA）
-   │  板块SPI = mean(成分股SPI)，无成分股 → -1（哨兵）
+   │    SpiCalculator.cal_index_spi(close_series)
+   │       → 整数 0~8（指数收盘价站上几条 EMA）
+   │  coverage = min(len(close_series)/233, 1.0)，不足 233 根标记 low confidence
    ▼
-PlateSpiRepository.upsert_snapshot(board_id, trade_date, spi_value, -1过滤)
+PlateSpiRepository.upsert_snapshot(board_id, trade_date, spi_value, confidence, coverage, board_name)
    │  (board_id, trade_date) 唯一约束 → 幂等
    ▼
 PlateSpiSnapshot 表 (storage.py)
@@ -225,12 +222,11 @@ POST /api/v1/plate-spi/backfill  {start_date}
 AnalysisTaskQueue.submit_background_task()   ← 复用现有队列，立即返回 task_id（HTTP 202）
    │
    ▼  后台线程（不阻塞 HTTP）
-PlateSpiService.backfill_history(start_date, end_date)
-   │  while current_date < end_date:
-   │     spi_time 锚定交易日
+SpiTaskRunner.backfill_history(start_date, end_date)
+   │  trading_dates = iter_trading_dates(start_date, end_date)
+   │  for current_date in trading_dates:
    │     全量板块并行计算（10.1 写流）
    │     任务进度更新：AnalysisTaskQueue.update_progress(done/total)
-   │     current_date = 下一交易日
    ▼
 GET /api/v1/plate-spi/status/{task_id}
    → {status: pending/running/completed/failed, progress: 0.65, done:195/300}
@@ -240,11 +236,11 @@ GET /api/v1/plate-spi/status/{task_id}
 
 ## 11. 核心逻辑流程图
 
-### 11.1 SPI 单股计算（算法核心，复刻 `emaForSPI` + `calStockSPI`）
+### 11.1 SPI 单序列计算（算法核心，复刻 `emaForSPI` + `calStockSPI`）
 
 ```
                     ┌─────────────────────────────────┐
-                    │ 输入: 成分股日线 close 序列      │
+                    │ 输入: close 序列（阶段1为行业指数）│
                     │      [c0, c1, ..., cN] (N+1根)   │
                     └──────────────┬──────────────────┘
                                    ▼
@@ -268,37 +264,31 @@ GET /api/v1/plate-spi/status/{task_id}
                     └─────────────────────────────────┘
 ```
 
-> EMA 实现：`pandas.Series.ewm(span=period, adjust=False).mean()`，等价 Java TA-Lib `core.ema`。
-> `adjust=False` 保证与 TA-Lib 递推公式一致（EMA[t] = α·price + (1-α)·EMA[t-1]）。
+> EMA 实现：`ewm(adjust=False)` + 手写 SMA warm-up 复刻 TA-Lib seed 语义。
+> 阶段1实际输入为**行业指数 close 序列**，算法仍复用 `ema_for_spi` / `cal_stock_spi` 的单序列判定。
 
 ### 11.2 板块 SPI 计算（并行编排）
 
 ```
         ┌──────────────────────────────────────────┐
-        │ cal_board_spi(board_id, trade_date):      │
+        │ cal_index_spi(board_id, trade_date):      │
         └────────────────────┬─────────────────────┘
                              ▼
         ┌──────────────────────────────────────────┐
-        │ stocks = XuangubaoFetcher.get_board_      │
-        │          constituents(board_id)           │  ← 接口②
+        │ kline = AkshareSwAdapter.get_index_kline( │
+        │          board_id, end_date=trade_date)   │
         └────────────────────┬─────────────────────┘
                              ▼
                    ┌─────────┴─────────┐
-                   │ 无成分股?          │
+                   │ K线为空/不足?      │
                    └────┬────────┬──────┘
                        YES      NO
                         │        │
                         ▼        ▼
                    return -1   ┌────────────────────────────┐
-                  (哨兵)       │ ThreadPoolExecutor 并行:    │
-                               │  for stock in stocks:       │
-                               │    kline = XGB.get_kline()  │ ← 接口③
-                               │    submit(cal_stock_spi,    │
-                               │           kline.close)      │
-                               └─────────────┬──────────────┘
-                                             ▼
-                               ┌────────────────────────────┐
-                               │ spi = mean(所有成分股SPI)   │
+                  (哨兵)       │ ema_for_spi(kline.close)    │
+                               │ cal_stock_spi(last_close)   │
+                               │ coverage=len/233            │
                                │ upsert_snapshot(...)        │
                                └────────────────────────────┘
 ```
@@ -357,16 +347,16 @@ POST /backfill ──► submit_background_task ──► 返回 task_id (202)
 
 | ID | 任务 | 依赖 | 验收（远端容器） |
 |---|---|---|---|
-| **1.0** | 选股宝连通性探查：DSA 环境实测 4 接口（`requests` 复刻 SmokeTest），确认字段映射 | 无 | 4 接口返回 200 + 字段对齐 `close_px→close` |
-| **1.1** | `XuangubaoFetcher`：实现 `get_plate_rank`/`get_board_constituents`/`get_kline`/`get_plate_history`，注册进 `DataFetcherManager` | 1.0 | `pytest test_xuangubao_fetcher.py` 通过 |
-| **1.2** | `storage.py` 加 `PlateSpiSnapshot`（board_id,trade_date,spi,UNIQUE）+ `SpiBackfillTaskRun` 表 | 无 | 建表成功，alembic/schema 可用 |
-| **1.3** | `SpiCalculator` 纯算法：`ema_for_spi`/`cal_stock_spi`/`cal_board_spi` | 无 | `pytest test_spi_calculator.py`（mock close 序列，断言 0~8） |
+| **1.0** | `akshare` 申万一级行业指数契约探查：确认 `sw_index_first_info` / `index_hist_sw` 字段、代码格式、日期顺序 | 无 | 返回 31 个一级行业；字段映射为 `board_id/board_name/date/close` |
+| **1.1** | `AkshareSwAdapter`：实现 `get_sw_first_levels` / `get_index_kline(end_date=anchor_date)`，不注册进 `DataFetcherManager` | 1.0 | `pytest test_akshare_sw_adapter.py` 通过 |
+| **1.2** | `storage.py` 加 `PlateSpiSnapshot`（board_id,board_name,trade_date,spi,UNIQUE）+ `SpiBackfillTaskRun` 表 | 无 | 建表成功，`Base.metadata.create_all()` 可用 |
+| **1.3** | `SpiCalculator` 纯算法：`ema_for_spi`/`cal_stock_spi`/`cal_index_spi` | 无 | `pytest test_spi_calculator.py`（mock close 序列，断言 0~8） |
 | **1.4** | `PlateSpiRepository`：upsert（幂等）/ find_top_boards / find_board_series | 1.2 | upsert 重复不产生重复行；排名过滤 -1 |
-| **1.5** | `PlateSpiService`：单板块计算 + 全量并行（ThreadPool）+ `spi_time` 锚点 | 1.1,1.3,1.4 | 单板块 E2E：落库一条非 -1 快照 |
-| **1.6** | 异步任务接入：`backfill_history` 提交 `AnalysisTaskQueue` + 进度更新；`refresh_daily` | 1.5 | backfill 返回 task_id，status 推进至 COMPLETED |
+| **1.5** | `PlateSpiService`：单板块指数 SPI 计算 + 全量并行（ThreadPool）+ `spi_time` 锚点 + coverage 语义 | 1.1,1.3,1.4 | 单板块 E2E：落库一条非 -1 快照 |
+| **1.6** | 异步任务接入：`SpiTaskRunner.backfill_history` 提交 `AnalysisTaskQueue` + 交易日进度更新 + `SpiBackfillTaskRun` 元数据记录 | 1.5 | backfill 返回 task_id，status 推进至 COMPLETED |
 | **1.7** | API 端点 `plate_spi.py`：`/refresh` `/backfill` `/status/{task_id}` `/rankings` | 1.5,1.6 | curl 4 端点，rankings 返回 Top 30 × 100 日 |
-| **1.8** | `scheduler.py` 注册日终刷新任务（盘后定时） | 1.6 | 定时触发，日志可见 |
-| **1.9** | 远端 dsa-server 验收：挂载源码 → 重建容器（无新pip依赖则仅重启）→ curl 接口 + 查快照表 | 1.1-1.8 | 全流程通过，符合 CLAUDE.md §5.3 |
+| **1.8** | `main.py` 在 `scheduled_task()` 主分析后追加 SPI 日终刷新（异常隔离） | 1.6 | 定时触发，日志可见 |
+| **1.9** | 本地/远端验收：`py_compile` + SPI 定向 pytest + API 端点 + 快照表检查 | 1.1-1.8 | 全流程通过，符合 CLAUDE.md §5.3 |
 
 ---
 
@@ -376,19 +366,19 @@ POST /backfill ──► submit_background_task ──► 返回 task_id (202)
 
 | # | 决策 | 依据 |
 |---|---|---|
-| D1 | ~~不缓存 K 线~~ **【§29 C-2 废除】** → **复用 DSA 现有 `StockDaily` 表做读源**：SPI 计算优先 `StockRepository.get_range()` 读本地已落盘日线，miss 才回源选股宝并落盘 | 用户决策 C-2=(c)；两模型共识 153 万次请求必触发限流 |
+| D1 | **阶段1按行业指数直算 SPI**：直接读取申万一级行业指数历史日线，不再走“成分股逐股 K 线 + 均值聚合”与 `StockDaily` 本地回填链路 | 当前实现已切换为 `akshare` 行业指数路径，复杂度与请求量显著下降 |
 | D2 | **板块级并行**（ThreadPoolExecutor，非进程池） | SPI 是 IO 密集（拉 K 线），线程池够用；用户 S10=A |
 | D3 | ~~EMA 用 `ewm(adjust=False)` 等价 TA-Lib~~ **【§29 C-3 修订】** → **EMA 用 `ewm(adjust=False)` + 手写 SMA warm-up 复刻 TA-Lib seed 语义**；编码前以 Java 5/13/233 输出做黄金样例逐值对表，对齐才算迁移成功 | TA-Lib 前 N 期用 SMA seed，pandas 默认首点 seed，长周期(144/233)有偏差（Codex 实证 `Indicators.java:68`） |
-| D4 | **`-1` 哨兵保留**：无成分股/节假日板块 SPI=-1，查询层过滤 | Java `calSPI` 语义，S3=A |
+| D4 | **`-1` 哨兵保留**：无可用行业指数日线/历史不足无法算出 SPI 时写 `-1`，查询层过滤 | 保持阶段1无效快照语义稳定 |
 | D5 | **upsert 幂等**：(board_id,trade_date) UNIQUE 约束 | S7=A，回算可重跑 |
 | D6 | **异步任务复用 `AnalysisTaskQueue`**（不新建队列） | S6=A，规避 Java 同步超时陷阱（A3） |
-| D7 | ~~三个现有函数零侵入~~ **【§29 H-1 强化】** → **XGB 做 SPI 私有 adapter**：不继承 `BaseFetcher`、不进 `DataFetcherManager` 全局优先级链、不实现 `get_sector_rankings` 等公共能力；`base.py` 不改动。三个现有函数只读复用 | H-1：注册全局 fetcher 会改现有 provider 选择（`base.py:1115/3459`）；用户决策 H-1=A |
-| D8 | **选股宝 symbol 格式 `600000.SS`/`000001.SZ`**，成功码 `20000`，GET 无鉴权头 | Codex 实证（`XGBApiGatewaySmokeTest.java:37`）；远端实测待任务 1.0 |
+| D7 | **SPI 私有 adapter**：`AkshareSwAdapter` 不接入 `BaseFetcher` / `DataFetcherManager`，SPI 链路保持零侵入 | 避免影响既有 provider 选择与板块能力调用方 |
+| D8 | **申万行业标识统一为 6 位 `board_id`**（去掉 `.SI` 后缀），并同步持久化 `board_name` | 当前实现字段规范：`801010.SI` → `801010` |
 | **D9** | **`spi_time` 用现成 `get_effective_trading_date`**（交易日语义，非复刻 Java 前一自然日） | H-2：DSA 已有 `trading_calendar.py:196`；有意修正 Java 不严谨的日历处理 |
 | **D10** | **排名查询按 anchor 日期**（非 Java `findMostLimit` 的 latest batch 语义） | H-4：Java 忽略传入 date 只取 latest（`PlateElementDayValueServiceI.java:27/34`），DSA 按 anchor 更正确，有意修正 |
 | **D11** | **单一并发层**：回算任务内部 ThreadPool（板块级，上限 `min(32,cpu*4)` 实测调整），队列层串行提交 | H-5：避免队列 3 worker × 任务内 ThreadPool 的两级并发失控（`task_queue.py:174/208`） |
-| **D12** | **coverage 阈值**：板块有效成分股 < 60% 时 SPI 标记低置信度，非静默均值 | M-2：停牌/退市/新股降级，避免静默偏差 |
-| **D13** | **point-in-time 语义 = K 线 point-in-time**（成分股沿用当前快照，含生存者偏差，与 Java 一致） | C-1：Java `subStocks` 原口径，用户确认复刻 |
+| **D12** | **coverage 阈值**：行业指数可用 K 线 < 233 根时 SPI 标记低置信度；≥233 根为 normal | 当前实现的 coverage 已从“成分股覆盖率”改为“K 线长度覆盖率” |
+| **D13** | **point-in-time 语义 = 指数 K 线 point-in-time**：历史 SPI 以 `anchor_date` 截止的行业指数 close 序列计算；阶段1不再承担成分股锁定语义 | 与当前 direct-index SPI 实现一致；成分股 point-in-time 下沉到阶段2/3 |
 
 ---
 
@@ -405,7 +395,7 @@ POST /backfill ──► submit_background_task ──► 返回 task_id (202)
 ---
 
 **规划置信度**：High。目录/数据流/算法均来自 DSA 现有范式 + Java 源码逐行追溯，无推测。
-**唯一实施风险**：C1（选股宝鉴权），由任务 1.0 在编码前实测消解。
+**唯一实施风险**：C4（`akshare` 行业指数契约与环境可达性），由任务 1.0 在编码前实测消解。
 
 ---
 ---
@@ -414,7 +404,7 @@ POST /backfill ──► submit_background_task ──► 返回 task_id (202)
 
 > 依据：会话 `e1883821` 调研结论 + Java `Indicators.emaForSPI`/`SourceBar`（已确认 Java 侧 v2 **未实现**，纯新增）+
 > DSA 现有 `ewm(adjust=False)` 范式（`stock_analyzer.py`/`alert_indicators.py`）+ YAML 策略范式（`strategies/*.yaml`）。
-> **前置依赖**：阶段1 全部产出（选股宝适配层、SPI 快照表、异步任务、`PlateSpiSnapshot`）。
+> **前置依赖**：阶段1 全部产出（行业指数适配层、SPI 快照表、异步任务、`PlateSpiSnapshot`）。
 
 ---
 
@@ -463,7 +453,7 @@ daily_stock_analysis/
 ## 16. SPI v2 因子数据流
 
 ```
-成分股日K线 (close/high/low 序列，阶段1已能取)
+成分股日K线 (close/high/low 序列，阶段2补齐成分股链路后可取)
    │
    ▼
 ema_for_spi_v2(close_series)
@@ -489,7 +479,7 @@ SpiScorer.score(factors, weights)
    │    v2_score = Σ(weight_i × factor_i)
    │  归一化到 [0, 100]
    ▼
-cal_stock_spi_v2 单股 v2 分 → 板块均值（复用阶段1 cal_board_spi 编排）
+cal_stock_spi_v2 单股 v2 分 → 板块聚合（阶段2 自建成分股编排，不再依赖阶段1 `cal_board_spi`）
    ▼
 PlateSpiSnapshot.v2_score 列（ALTER TABLE 加列）
 ```
@@ -642,8 +632,8 @@ SpiScorer.score():
 # 阶段 3 详细规划：比价系统
 
 > 依据：会话 `e1883821` I4 + 调研3（CMF/资金流）+ DSA `capital_flow_context`(个股级 stock_flow) +
-> `StockRepository.get_range`(历史日线含 volume) + 阶段1选股宝成分股 + 阶段2 point-in-time 快照。
-> **前置依赖**：阶段1（选股宝成分股）、阶段2（point-in-time 成分股快照）。
+> `StockRepository.get_range`(历史日线含 volume) + 阶段1板块 SPI/行业指数基础 + 阶段2 point-in-time 快照。
+> **前置依赖**：阶段1（板块 SPI 与行业指数基础）、阶段2（point-in-time 成分股快照）。
 
 ---
 
@@ -812,7 +802,7 @@ capital_proxy.extract(stock_flow)
 
 ```
 阶段1 (SPI v1 迁移)
-  ├─ 选股宝适配层 ──────────────────┐
+  ├─ 行业指数适配层 (`akshare`) ────┐
   ├─ SPI 快照表 ────────────────────┤
   ├─ 异步任务队列 ──────────────────┤
   └─ spi_calculator (ema_for_spi) ──┤
@@ -823,7 +813,7 @@ capital_proxy.extract(stock_flow)
   ├─ 轮动信号 (观察池/入场/出场)    │
   └─ v2 打分引擎 ───────────────────┤
                                     ▼
-阶段3 (比价系统)                    │ 复用阶段1选股宝 + 阶段2成分股快照
+阶段3 (比价系统)                    │ 复用阶段1板块 SPI/指数基础 + 阶段2成分股快照
   ├─ CMF 因子 ◄─ StockRepository.get_range (现有)
   ├─ 相对强弱 ◄─ 板块均值
   ├─ 资金流代理 ◄─ capital_flow_context (只读适配)
@@ -831,7 +821,7 @@ capital_proxy.extract(stock_flow)
 ```
 
 **全周期置信度**：High。三阶段目录/数据流/算法均锚定 DSA 现有范式 + Java 源码 + 会话调研结论。
-**累计新建文件**：阶段1(9) + 阶段2(11) + 阶段3(9) = 29 文件，改动现有文件均限定在 `storage.py`(加表/列)、`spi_calculator.py`(升级)、`base.py`/`scheduler.py`/`plate_spi.py`(扩展)，零侵入业务现有功能。
+**累计新建文件**：阶段1 以 `src/services/spi/` 与 `plate_spi` API 为主；现有文件改动集中在 `storage.py`、`main.py`、`plate_spi.py` 与路由聚合，保持对既有业务零侵入。
 
 ---
 ---
@@ -848,16 +838,16 @@ capital_proxy.extract(stock_flow)
 
 | # | 问题 | 两模型判断 | **用户决策 → 修订** |
 |---|---|---|---|
-| **C-1** | 历史成分股 point-in-time | 担心 `plate_set` 仅当前快照→生存者偏差，阶段2 无法修复部署前历史 | **复刻 Java 口径**（用户"已实现可复用"）。核实 Java `PlateElementGatewayImpl.subStocks`：成分股取 `plate_set` 当前快照，K 线取 `stockData(timestamp=calTime, backCount=300)` **截至历史日的 K 线**。即 Java 原口径 = "当前成分股 + point-in-time K线"。**K 线无前视（point-in-time 成立），成分股名单含生存者偏差（与 Java 一致，接受）**。→ 无需额外历史成分股接口，§11.2 / §18 point-in-time 语义改为"K线 point-in-time"，成分股沿用当前快照 |
-| **C-2** | K线缓存 vs 153万次请求冲突 | 维持不缓存→必触发限流/封禁 | **(c) 复用 DSA 现有 `StockDaily` 表做读源**。→ 废除 X5"不缓存K线"对 SPI 场景的适用：SPI 计算优先读 `StockRepository.get_range()` 本地已落盘日线；缺失才回源选股宝并落盘。**§10.1 写流改为"先查本地 StockDaily，miss 时拉选股宝并持久化"** |
+| **C-1** | 历史成分股 point-in-time | 早期方案担心 `plate_set` 仅当前快照→生存者偏差，阶段2 无法修复部署前历史 | **阶段1不再以成分股聚合作为 SPI 主链路**。当前实现改为申万一级行业指数直算 SPI，历史回算只需保证**指数 K 线 point-in-time**；成分股 point-in-time 仍保留在阶段2/3 处理 |
+| **C-2** | 成分股逐股 K 线请求量过大 | 逐股 300 日 K 线会放大请求量、并引入本地缓存/回填复杂度 | **阶段1改为行业指数直算**。直接读取 `ak.index_hist_sw(symbol, period="day")` 截止 `anchor_date` 的历史日线，移除 `StockDaily` / 选股宝逐股回源依赖 |
 | **C-3** | EMA 保真度 | TA-Lib 前 N 期 SMA seed ≠ pandas 首点 seed，长周期(144/233)偏差 | **编码前做黄金样例对表**。→ §12 新增任务 **1.0a**：取 Java 5/13/233 周期输出做逐值对表，定 Python seed/lookback 实现（手写 SMA warm-up 复刻 TA-Lib），对齐后才算迁移成功 |
-| **C-4** | 选股宝真实契约 | symbol 格式/鉴权/限流未在远端验证 | **任务 1.0 升级为远端 smoke**（DSA 远端环境实测，非本机）。Codex 已实证：Java 用 `600000.SS`+`close_px`+成功码 `20000`+GET 无鉴权头。→ §12 任务 1.0 验收加"远端可达 + 限流上限实测" |
+| **C-4** | 行业指数真实契约 | 申万一级列表、指数代码与历史日线字段需在当前运行环境确认 | **任务 1.0 升级为 `akshare` 契约 smoke**：确认 `sw_index_first_info` 返回 31 个一级行业、`index_hist_sw` 可按代码取历史日线、代码可规范化为 6 位 `board_id` |
 
 ## 29.2 High 问题处置（用户已决策 A）
 
 | # | 问题 | Codex 实证 | **修订（采纳）** |
 |---|---|---|---|
-| **H-1** | 注册全局 fetcher ≠ 零侵入 | `get_sector_rankings()` 遍历全部 fetcher，XGB 暴露同名能力会改现有 provider 选择（`base.py:1115/3459`） | **XGB 做 SPI 私有 adapter，不进 `DataFetcherManager` 全局优先级链，不实现 `get_sector_rankings` 等公共能力**。→ §9 改：`xuangubao_fetcher.py` 不继承 BaseFetcher/不注册 manager，由 `PlateSpiService` 直接持有；§13 D7 强化；`base.py` **不再改动**（原 §9 "改1处注册"废除） |
+| **H-1** | 注册全局 fetcher ≠ 零侵入 | SPI 若挂进公共 fetcher 链会污染既有 provider 选择 | **行业指数 adapter 做 SPI 私有 adapter**，不进 `DataFetcherManager`、不实现通用板块能力；`base.py` 保持零改动 |
 | **H-2** | `spi_time` 语义错误 | Java 是前一**自然日**15:00（非交易日）；DSA 已有 `get_effective_trading_date()`（`trading_calendar.py:196`）按交易所日历 | **用现成 `get_effective_trading_date` 修正为交易日语义**（有意修正，非复刻 Java）。→ §11.3 / §9 `spi_time.py` 改为薄封装调用 `get_effective_trading_date`；§13 加 D9 |
 | **H-3** | `capital_flow_context` 字段假设错误 | 实际输出 `main_net_inflow/inflow_5d/inflow_10d`，且是实时块非历史序列，不能回算历史（`fundamental_adapter.py:416`） | **比价资金流代理改为：CMF(基于K线,历史可得) 为主 + `main_net_inflow` 等实际字段名(仅当日/近端,不回算历史)**。→ §24.3 / §23 字段名修正；历史比价仅用 CMF + RS，资金流代理仅用于当日增强 |
 | **H-4** | `findMostLimit` 排名语义偏差 | Java 忽略传入 date、只取 latest batch（`PlateElementDayValueServiceI.java:27/34`） | **标注为有意修正**：DSA 按-anchor-日期查排行更正确。→ §13 加 D10 备注，非 bug |
@@ -868,7 +858,7 @@ capital_proxy.extract(stock_flow)
 | # | 问题 | 修订 |
 |---|---|---|
 | **M-1** 交易日历 | 已由 H-2 解决（用 `get_effective_trading_date`） |
-| **M-2** 停牌/退市/新股降级 | §11.1 / §13 加 coverage 阈值：板块有效成分股 < 阈值(默认 60%) 时 SPI 标记为低置信度而非静默均值 |
+| **M-2** 停牌/退市/新股降级 | §11.1 / §13 加 coverage 阈值：行业指数可用 K 线 < 233 根时 SPI 标记低置信度，而非继续把它当完整样本 |
 | **M-3** 任务状态真源 | `AnalysisTaskQueue` 为状态真源；`SpiBackfillTaskRun` 仅记回算业务元数据(起止日/板块数)，进程重启由队列恢复 |
 | **M-4** 信号表幂等 | `SpiRotationSignal` 加 `UNIQUE(board_id,stock_code,trade_date,action)` 约束（§15 表定义补） |
 | **M-5** CMF Σvolume=0 保护 | §24.1 补除零保护 + K线复权一致性(统一前复权) |
@@ -881,9 +871,11 @@ capital_proxy.extract(stock_flow)
 
 ```
 变更：
-- data_provider/xuangubao_fetcher.py  → 改为 src/services/spi/xuangubao_adapter.py（SPI 私有 adapter，不进全局 fetcher 链）
+- data_provider/xuangubao_fetcher.py  → 改为 src/services/spi/akshare_sw_adapter.py（SPI 私有 adapter，不进全局 fetcher 链）
                                          ※ 不再继承 BaseFetcher，不再改 data_provider/base.py
-- src/utils/spi_time.py               → 薄封装，调用现有 src/core/trading_calendar.py:get_effective_trading_date
+- cal_board_spi / 成分股均值路径       → 改为 cal_index_spi / 行业指数 direct SPI
+- src/utils/spi_time.py               → 改为 src/services/spi/spi_time.py，薄封装 `get_effective_trading_date` + trading-date 迭代
+- scheduler.py 盘后任务               → 改为 main.py `scheduled_task()` 链式追加 SPI 刷新
 - alembic/  字样                      → 删除，建表统一用 storage.py 的 Base.metadata.create_all()
 - 新增任务 1.0a                        → EMA 黄金样例对表（Java 5/13/233 逐值 vs Python 实现）
 ```
@@ -894,9 +886,9 @@ capital_proxy.extract(stock_flow)
 |---|---|---|
 | 架构对齐 | High | **High**（H-1 私有 adapter 后真零侵入）|
 | 算法保真 | Medium（EMA seed 未定）| **High**（C-3 黄金样例对表 + C-1 Java 口径复刻）|
-| 数据可行 | Low（153万请求爆炸）| **High**（C-2 复用 StockDaily 本地读源）|
+| 数据可行 | Low（153万请求爆炸）| **High**（C-2 改为行业指数 direct SPI，移除逐股请求爆炸）|
 | 并发/恢复 | Medium（两级并发）| **High**（H-5 单一并发层 + M-3 状态真源）|
 | **总体可执行性** | **Medium** | **High**（Codex/Gemini 共识：解决 C-1/C-2 后升至 High，现已解决）|
 
 **结论**：方案经双模型审查 + 用户决策修订后，所有 Critical/High 已闭环，可进入阶段 1 编码。
-**唯一编码前硬门槛**：任务 1.0（远端选股宝 smoke）+ 任务 1.0a（EMA 黄金样例对表）。
+**唯一编码前硬门槛**：任务 1.0（`akshare` 行业指数契约 smoke）+ 任务 1.0a（EMA 黄金样例对表）。

@@ -65,6 +65,16 @@ class TestComputeBoardSpi:
         assert bid_int == 801020
         assert isinstance(bid_int, int)
 
+    def test_compute_board_spi_passes_anchor_date(self, service, mock_adapter):
+        anchor_date = date(2025, 1, 7)
+        mock_adapter.get_index_kline.return_value = _make_klines(300, base=10.0)
+        service.compute_board_spi("801010", anchor_date, "农林牧渔")
+        mock_adapter.get_index_kline.assert_called_once_with(
+            "801010",
+            back_count=300,
+            end_date=anchor_date,
+        )
+
 
 class TestRefreshAll:
 
@@ -95,7 +105,7 @@ class TestRefreshAll:
         mock_adapter.get_sw_first_levels.return_value = levels
         call_count = 0
 
-        def side_effect(board_id, back_count=300):
+        def side_effect(board_id, back_count=300, end_date=None):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -118,7 +128,7 @@ class TestRefreshAll:
             "801002": _make_klines(50, base=10.0),
         }
         mock_adapter.get_index_kline.side_effect = (
-            lambda board_id, back_count=300: kline_map[board_id])
+            lambda board_id, back_count=300, end_date=None: kline_map[board_id])
         result = service.refresh_all(anchor_date=date(2025, 1, 1))
         assert result["low_confidence"] == 1
         assert result["success"] == 2
