@@ -1,0 +1,3 @@
+{"_example": "Fill with {\"file\": \"path\", \"reason\": \"why\"}. Seed rows are skipped."}
+{"file": "docs/product-specs/spi-rotation-pricing-requirement-boundary.md", "reason": "阶段2权威规格：§15 目录 / §16 v2 因子数据流 / §17 4 因子逻辑 / §18 轮动闭环 / §19 WBS / §20 设计决策"}
+{"file": "docs/external-data-sources.md", "reason": "外部数据源契约参考：成分股链路（AlphaSift）与 akshare 行业指数接口的字段/认证/限流说明，供 1.1 成分股映射审计与 2.4 constituents_snapshot 实现参考"}
