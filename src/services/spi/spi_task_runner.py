@@ -42,6 +42,46 @@ class SpiTaskRunner:
             except Exception as exc:
                 logger.warning("rotation signal generation failed, skipping: %s", exc)
 
+            try:
+                from src.services.pricing_service import PricingService
+                pricing = PricingService()
+                top_boards = self.task_repo.find_top_boards_v2(
+                    anchor_date=anchor_date, top_n=30
+                )
+                logger.info(
+                    "pricing: starting board pricing for %d boards date=%s",
+                    len(top_boards),
+                    anchor_date,
+                )
+                priced_total = 0
+                degraded_total = 0
+                for board in top_boards:
+                    board_id = board["board_id"]
+                    try:
+                        result = pricing.price_board(board_id, anchor_date)
+                        priced_total += result.get("priced_count", 0)
+                        degraded_total += result.get("degraded_count", 0)
+                        logger.debug(
+                            "pricing board=%s status=%s priced=%s degraded=%s",
+                            board_id,
+                            result.get("status"),
+                            result.get("priced_count"),
+                            result.get("degraded_count"),
+                        )
+                    except Exception as board_exc:
+                        logger.warning(
+                            "pricing board=%s failed, skipping: %s", board_id, board_exc
+                        )
+                logger.info(
+                    "pricing: completed date=%s boards=%d priced=%d degraded=%d",
+                    anchor_date,
+                    len(top_boards),
+                    priced_total,
+                    degraded_total,
+                )
+            except Exception as exc:
+                logger.warning("pricing refresh failed, skipping: %s", exc)
+
         return self._submit_spi_task(
             run_task=_run,
             stock_name="SPI日终刷新",

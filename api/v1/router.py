@@ -22,6 +22,7 @@ from api.v1.endpoints import (
     health,
     history,
     intelligence,
+    plate_pricing,
     plate_spi,
     portfolio,
     stocks,
@@ -115,6 +116,12 @@ router.include_router(
     plate_spi.router,
     prefix="/plate-spi",
     tags=["PlateSpi"]
+)
+
+router.include_router(
+    plate_pricing.router,
+    prefix="/plate-pricing",
+    tags=["PlatePricing"]
 )
 
 router.include_router(

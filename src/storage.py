@@ -1139,6 +1139,46 @@ class ConstituentSnapshot(Base):
     )
 
 
+class PricingFactorRun(Base):
+    __tablename__ = 'pricing_factor_run'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    constituent_source = Column(String(16), nullable=False)  # 'snapshot' | 'current'
+    rs_window = Column(Integer, nullable=False)
+    cmf_window = Column(Integer, nullable=False)
+    base_weights_json = Column(Text, nullable=False)
+    effective_weights_json = Column(Text, nullable=False)
+    flow_coverage = Column(Float)
+    constituent_count = Column(Integer)
+    priced_count = Column(Integer)
+    degraded_count = Column(Integer)
+    status = Column(String(24), nullable=False, index=True)  # 'ok' | 'partial' | 'failed'
+    error = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now)
+
+
+class PricingSnapshot(Base):
+    __tablename__ = 'pricing_snapshot'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, nullable=False, index=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    rs_score = Column(Float)
+    cmf = Column(Float)           # raw CMF ∈ [-1, 1]
+    flow_score = Column(Float)
+    total = Column(Float)         # combined score ∈ [0, 1]
+    status = Column(String(32), nullable=False, index=True)  # 'ok' | 'degraded' | 'missing_core_factor' | 'missing_constituents'
+    factor_mask = Column(String(16))  # bitmask string, e.g. 'rs,cmf,flow'
+    run_id = Column(Integer, ForeignKey('pricing_factor_run.id'), index=True)
+
+    __table_args__ = (
+        UniqueConstraint('board_id', 'stock_code', 'trade_date', name='uq_pricing_snapshot'),
+    )
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

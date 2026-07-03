@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+import json
+from datetime import date
+from typing import Dict, List, Optional
+
+from sqlalchemy import and_, select, desc, nulls_last
+
+from src.storage import DatabaseManager, PricingFactorRun, PricingSnapshot, utc_naive_now
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PricingRepository:
+
+    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+        self.db = db_manager or DatabaseManager.get_instance()
+
+    def upsert_pricing(
+        self,
+        *,
+        board_id: int,
+        stock_code: str,
+        trade_date: date,
+        rs_score: Optional[float],
+        cmf: Optional[float],
+        flow_score: Optional[float],
+        total: Optional[float],
+        status: str,
+        factor_mask: Optional[str] = None,
+        run_id: Optional[int] = None,
+    ) -> None:
+        with self.db.get_session() as session:
+            existing = session.execute(
+                select(PricingSnapshot).where(
+                    and_(
+                        PricingSnapshot.board_id == board_id,
+                        PricingSnapshot.stock_code == stock_code,
+                        PricingSnapshot.trade_date == trade_date,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing:
+                existing.rs_score = rs_score
+                existing.cmf = cmf
+                existing.flow_score = flow_score
+                existing.total = total
+                existing.status = status
+                existing.factor_mask = factor_mask
+                existing.run_id = run_id
+            else:
+                session.add(PricingSnapshot(
+                    board_id=board_id,
+                    stock_code=stock_code,
+                    trade_date=trade_date,
+                    rs_score=rs_score,
+                    cmf=cmf,
+                    flow_score=flow_score,
+                    total=total,
+                    status=status,
+                    factor_mask=factor_mask,
+                    run_id=run_id,
+                ))
+            session.commit()
+
+    def insert_factor_run(
+        self,
+        *,
+        board_id: int,
+        trade_date: date,
+        constituent_source: str,
+        rs_window: int,
+        cmf_window: int,
+        base_weights: Dict,
+        effective_weights: Dict,
+        flow_coverage: Optional[float] = None,
+        constituent_count: Optional[int] = None,
+        priced_count: Optional[int] = None,
+        degraded_count: Optional[int] = None,
+        status: str,
+        error: Optional[str] = None,
+    ) -> int:
+        with self.db.get_session() as session:
+            run = PricingFactorRun(
+                board_id=board_id,
+                trade_date=trade_date,
+                constituent_source=constituent_source,
+                rs_window=rs_window,
+                cmf_window=cmf_window,
+                base_weights_json=json.dumps(base_weights),
+                effective_weights_json=json.dumps(effective_weights),
+                flow_coverage=flow_coverage,
+                constituent_count=constituent_count,
+                priced_count=priced_count,
+                degraded_count=degraded_count,
+                status=status,
+                error=error,
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            return run.id
+
+    def find_board_pricing_rank(
+        self, *, board_id: int, trade_date: date,
+    ) -> List[PricingSnapshot]:
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(PricingSnapshot)
+                .where(
+                    and_(
+                        PricingSnapshot.board_id == board_id,
+                        PricingSnapshot.trade_date == trade_date,
+                    )
+                )
+                .order_by(
+                    nulls_last(desc(PricingSnapshot.total))
+                )
+            ).scalars().all()
+            return list(rows)
+
+    def find_latest_trade_date(self, *, board_id: int) -> Optional[date]:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(PricingSnapshot.trade_date)
+                .where(PricingSnapshot.board_id == board_id)
+                .order_by(desc(PricingSnapshot.trade_date))
+                .limit(1)
+            ).scalar_one_or_none()
+            return row
