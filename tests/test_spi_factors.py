@@ -137,6 +137,18 @@ class TestSeparation:
         }
         assert self.factor.compute(series, 10.0) == 0.0
 
+    def test_empty_series_entries_do_not_raise(self):
+        series = {
+            5: [],
+            13: [10.0] * 5,
+            21: [10.0] * 5,
+            89: [],
+            144: [9.0] * 5,
+            233: [9.0] * 5,
+        }
+        result = self.factor.compute(series, 10.0)
+        assert 0.0 <= result <= 1.0
+
     def test_missing_short_group(self):
         series = {89: [100.0] * 5, 144: [98.0] * 5}
         assert self.factor.compute(series, 100.0) == 0.0

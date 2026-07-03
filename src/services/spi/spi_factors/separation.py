@@ -11,8 +11,8 @@ class SeparationFactor(SpiFactor):
         self.weight = weight
 
     def compute(self, ema_series: dict, last_close: float) -> float:
-        short_vals = [ema_series[p][-1] for p in _SHORT_PERIODS if p in ema_series]
-        long_vals = [ema_series[p][-1] for p in _LONG_PERIODS if p in ema_series]
+        short_vals = [ema_series[p][-1] for p in _SHORT_PERIODS if ema_series.get(p)]
+        long_vals = [ema_series[p][-1] for p in _LONG_PERIODS if ema_series.get(p)]
         if not short_vals or not long_vals:
             return 0.0
         short_avg = sum(short_vals) / len(short_vals)

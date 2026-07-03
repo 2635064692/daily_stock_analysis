@@ -37,15 +37,8 @@ class SpiTaskRunner:
 
             try:
                 from src.services.spi.rotation_service import RotationService
-                from src.utils.constituents_snapshot import ConstituentSnapshotRepo
                 rotation = RotationService()
-                watchpool = rotation.update_watchpool(anchor_date)
-                for board_id in watchpool:
-                    constituents = ConstituentSnapshotRepo().get_constituents(board_id, anchor_date)
-                    if not constituents:
-                        continue
-                    rotation.check_entry(board_id, anchor_date)
-                    rotation.check_exit(board_id, anchor_date)
+                rotation.generate_signals(anchor_date)
             except Exception as exc:
                 logger.warning("rotation signal generation failed, skipping: %s", exc)
 

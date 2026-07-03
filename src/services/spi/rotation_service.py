@@ -1,31 +1,161 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
 import logging
 from datetime import date
-from typing import List, Set
+from pathlib import Path
+from typing import List, Optional, Set
 
 import pandas as pd
+import yaml
 
 from src.repositories.plate_spi_repo import PlateSpiRepository
-from src.utils.constituents_snapshot import ConstituentSnapshotRepo
+from src.utils.constituents_snapshot import ConstituentFetcher, ConstituentSnapshotRepo
 
 logger = logging.getLogger(__name__)
+_ROTATION_CONFIG_PATH = Path(__file__).resolve().parents[3] / "strategies" / "rotation_entry.yaml"
+
+
+@dataclass(frozen=True)
+class RotationStrategyConfig:
+    watchpool_top_n: int = 30
+    entry_ema_period: int = 20
+    volume_ratio_threshold: float = 1.2
+    pullback_tolerance: float = 0.02
+    exit_top_m: int = 50
+    exit_ema_period: int = 5
+
+
+def _positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _nonnegative_float(value, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+@lru_cache(maxsize=1)
+def load_rotation_strategy_config() -> RotationStrategyConfig:
+    defaults = RotationStrategyConfig()
+    try:
+        with _ROTATION_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+    except FileNotFoundError:
+        logger.warning("rotation strategy config not found: %s", _ROTATION_CONFIG_PATH)
+        return defaults
+    except Exception:
+        logger.warning("failed to load rotation strategy config", exc_info=True)
+        return defaults
+
+    entry = payload.get("entry") or {}
+    exit_cfg = payload.get("exit") or {}
+    watchpool = payload.get("watchpool") or {}
+    return RotationStrategyConfig(
+        watchpool_top_n=_positive_int(watchpool.get("top_n"), defaults.watchpool_top_n),
+        entry_ema_period=_positive_int(entry.get("ema_period"), defaults.entry_ema_period),
+        volume_ratio_threshold=_nonnegative_float(
+            entry.get("volume_ratio_threshold"),
+            defaults.volume_ratio_threshold,
+        ),
+        pullback_tolerance=_nonnegative_float(
+            entry.get("pullback_tolerance"),
+            defaults.pullback_tolerance,
+        ),
+        exit_top_m=_positive_int(exit_cfg.get("top_m"), defaults.exit_top_m),
+        exit_ema_period=_positive_int(exit_cfg.get("ema_period"), defaults.exit_ema_period),
+    )
 
 
 class RotationService:
 
-    def __init__(self, repo=None, constituent_repo=None, db_manager=None):
+    def __init__(
+        self,
+        repo=None,
+        constituent_repo=None,
+        fetcher=None,
+        strategy_config=None,
+        db_manager=None,
+    ):
         self._repo: PlateSpiRepository = repo or PlateSpiRepository()
         self._constituent_repo: ConstituentSnapshotRepo = (
             constituent_repo or ConstituentSnapshotRepo()
         )
+        self._fetcher = fetcher or ConstituentFetcher()
+        self._strategy_config = strategy_config or load_rotation_strategy_config()
         self._watchpool: Set[int] = set()
 
-    def update_watchpool(self, trade_date: date, top_n: int = 30) -> Set[int]:
+    def update_watchpool(self, trade_date: date, top_n: Optional[int] = None) -> Set[int]:
+        top_n = top_n or self._strategy_config.watchpool_top_n
         boards = self._repo.find_top_boards_v2(anchor_date=trade_date, top_n=top_n)
-        self._watchpool = {d["board_id"] for d in boards}
+        self._watchpool = {item["board_id"] for item in boards}
         return self._watchpool
+
+    def generate_signals(self, trade_date: date) -> dict:
+        strategy = self._strategy_config
+        watchpool = self.update_watchpool(
+            trade_date,
+            top_n=strategy.watchpool_top_n,
+        )
+        buy_signal_count = 0
+        skipped_snapshot_boards = 0
+
+        for board_id in watchpool:
+            stock_codes = self._get_snapshot_constituents(board_id, trade_date)
+            if not stock_codes:
+                skipped_snapshot_boards += 1
+                continue
+            buy_signal_count += len(
+                self.check_entry(
+                    board_id,
+                    trade_date,
+                    entry_ema_period=strategy.entry_ema_period,
+                    volume_ratio_threshold=strategy.volume_ratio_threshold,
+                    pullback_tolerance=strategy.pullback_tolerance,
+                    stock_codes=stock_codes,
+                )
+            )
+
+        active_positions = self._repo.find_active_rotation_positions(before_date=trade_date)
+        board_ids_in_top_m = set()
+        if active_positions:
+            board_ids_in_top_m = {
+                item["board_id"]
+                for item in self._repo.find_top_boards_v2(
+                    anchor_date=trade_date,
+                    top_n=strategy.exit_top_m,
+                )
+            }
+
+        sell_signal_count = 0
+        for board_id, stock_codes in active_positions.items():
+            sell_signal_count += len(
+                self.check_exit(
+                    board_id,
+                    trade_date,
+                    top_m=strategy.exit_top_m,
+                    exit_ema_period=strategy.exit_ema_period,
+                    stock_codes=stock_codes,
+                    board_ids_in_top=board_ids_in_top_m,
+                )
+            )
+
+        return {
+            "watchpool_size": len(watchpool),
+            "active_position_boards": len(active_positions),
+            "buy_signals": buy_signal_count,
+            "sell_signals": sell_signal_count,
+            "skipped_snapshot_boards": skipped_snapshot_boards,
+        }
 
     def check_entry(
         self,
@@ -33,8 +163,13 @@ class RotationService:
         trade_date: date,
         entry_ema_period: int = 20,
         volume_ratio_threshold: float = 1.2,
+        pullback_tolerance: float = 0.02,
+        stock_codes: Optional[List[str]] = None,
     ) -> List[str]:
-        codes = self._constituent_repo.get_constituents(board_id, trade_date)
+        codes = stock_codes if stock_codes is not None else self._constituent_repo.get_constituents(
+            board_id,
+            trade_date,
+        )
         if not codes:
             return []
 
@@ -45,8 +180,8 @@ class RotationService:
                 if not rows:
                     continue
                 rows_asc = list(reversed(rows))
-                closes = [r.close for r in rows_asc if r.close is not None]
-                volumes = [r.volume for r in rows_asc if r.volume is not None]
+                closes = [row.close for row in rows_asc if row.close is not None]
+                volumes = [row.volume for row in rows_asc if row.volume is not None]
                 if len(closes) < 2:
                     continue
 
@@ -59,7 +194,7 @@ class RotationService:
                 else:
                     volume_ratio = 0.0
 
-                if last_close <= ema_val * 1.02 and volume_ratio >= volume_ratio_threshold:
+                if last_close <= ema_val * (1 + pullback_tolerance) and volume_ratio >= volume_ratio_threshold:
                     self._repo.upsert_rotation_signal(
                         board_id=board_id,
                         stock_code=stock_code,
@@ -70,7 +205,10 @@ class RotationService:
                     triggered.append(stock_code)
             except Exception:
                 logger.warning(
-                    "check_entry failed for board=%s stock=%s", board_id, stock_code, exc_info=True
+                    "check_entry failed for board=%s stock=%s",
+                    board_id,
+                    stock_code,
+                    exc_info=True,
                 )
 
         return triggered
@@ -81,12 +219,20 @@ class RotationService:
         trade_date: date,
         top_m: int = 50,
         exit_ema_period: int = 5,
+        stock_codes: Optional[List[str]] = None,
+        board_ids_in_top: Optional[Set[int]] = None,
     ) -> List[str]:
-        top_boards = self._repo.find_top_boards_v2(anchor_date=trade_date, top_n=top_m)
-        board_ids_in_top = {d["board_id"] for d in top_boards}
+        if board_ids_in_top is None:
+            top_boards = self._repo.find_top_boards_v2(anchor_date=trade_date, top_n=top_m)
+            board_ids_in_top = {item["board_id"] for item in top_boards}
 
-        codes = self._constituent_repo.get_constituents(board_id, trade_date)
+        codes = stock_codes if stock_codes is not None else self._constituent_repo.get_constituents(
+            board_id,
+            trade_date,
+        )
         triggered: List[str] = []
+        if not codes:
+            return triggered
 
         if board_id not in board_ids_in_top:
             for stock_code in codes:
@@ -102,7 +248,9 @@ class RotationService:
                 except Exception:
                     logger.warning(
                         "check_exit sell signal failed board=%s stock=%s",
-                        board_id, stock_code, exc_info=True,
+                        board_id,
+                        stock_code,
+                        exc_info=True,
                     )
             return triggered
 
@@ -112,7 +260,7 @@ class RotationService:
                 if not rows:
                     continue
                 rows_asc = list(reversed(rows))
-                closes = [r.close for r in rows_asc if r.close is not None]
+                closes = [row.close for row in rows_asc if row.close is not None]
                 if len(closes) < 2:
                     continue
 
@@ -130,10 +278,30 @@ class RotationService:
                     triggered.append(stock_code)
             except Exception:
                 logger.warning(
-                    "check_exit ema failed board=%s stock=%s", board_id, stock_code, exc_info=True
+                    "check_exit ema failed board=%s stock=%s",
+                    board_id,
+                    stock_code,
+                    exc_info=True,
                 )
 
         return triggered
+
+    def _get_snapshot_constituents(self, board_id: int, trade_date: date) -> List[str]:
+        existing_codes = self._constituent_repo.get_constituents(board_id, trade_date)
+        if existing_codes:
+            return existing_codes
+
+        fetched_codes = self._fetcher.fetch(board_id)
+        if not fetched_codes:
+            logger.warning(
+                "constituents snapshot unavailable board=%s trade_date=%s",
+                board_id,
+                trade_date,
+            )
+            return []
+
+        self._constituent_repo.save_constituents(board_id, trade_date, fetched_codes)
+        return fetched_codes
 
 
 def _get_latest(stock_code: str, days: int):

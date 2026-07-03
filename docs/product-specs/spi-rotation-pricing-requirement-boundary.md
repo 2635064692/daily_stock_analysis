@@ -4,6 +4,7 @@
 > 来源：creative-explore 会话，基于 b-quant-chan Java 侧 SPI 实现迁移 + 会话 `e1883821` 规划能力。
 > 范围：**纯后端**。三阶段分期交付。
 > **2026-07 实现同步说明**：阶段1当前已落地方案为 **`akshare` 申万一级行业指数直算 SPI**（31 个行业指数 close 序列 → `cal_index_spi`），不再以“选股宝成分股聚合”作为阶段1权威方案；成分股 point-in-time 与板块内比价仍保留在阶段2/3。
+> **2026-07-03 review / 修复归档**：phase2 首轮 review 的阻断项与修复闭环已归档到 `docs/histories/2026-07-03-spi-rotation-phase2-review-closure.md`。
 
 ---
 
@@ -690,40 +691,63 @@ daily_stock_analysis/
 ## 23. 比价系统数据流
 
 ```
-板块成分股（当前 AlphaSift 成分股链路的 current snapshot / 阶段2 point-in-time 快照）
-   │
+板块成分股（legulegu current snapshot / 阶段2 point-in-time 快照）
+   │   ※ 实现为 src/utils/constituents_snapshot.py 的 ConstituentFetcher(legulegu)
    ▼  对每个成分股
 ┌──────────────────────── 并行 ────────────────────────┐
 │                                                       │
 │ ▼ 相对强弱                ▼ CMF                      ▼ 资金流代理
 │ relative_strength.py      cmf.py                     capital_proxy.py
-│  个股收益 vs 板块均值      CMF(21):                    适配 capital_flow_context
-│  / 板块指数 超额           Σ[((c-l)-(h-c))/(h-l)×vol]  .stock_flow
-│  → RS_Score [0,1]         /Σvol → [-1,1]              → Flow_Score
-│                                                       │
+│  个股20日收益              CMF(20):                    适配 capital_flow_context
+│  板块内百分位 rank          Σ[((c-l)-(h-c))/(h-l)×vol]  .stock_flow 真实字段
+│  → rs_score [0,1]         /Σvol → [-1,1]              main_net_inflow 等
+│                            → cmf_score=(cmf+1)/2       → flow_score [0,1]
+│                            ∈[0,1]                       ※ 仅当日有效，历史日整批 None
 └───────────────────────────┬───────────────────────────┘
                             ▼
-              pricing_service.combine()
-                比价综合分 = w1·RS + w2·CMF + w3·Flow
+              pricing_service.combine()  ※ 批次级（板块-交易日）动态重归一化
+                尺度统一后: effective_w_i = base_w_i / Σ(base_w_active)
+                base: RS0.5/CMF0.3/Flow0.2；Flow 整批缺失→RS0.625/CMF0.375
+                RS 或 CMF 缺 → 该股 total=degraded（不参与排名）
+                比价综合分 = Σ(effective_w_i × factor_i) ∈ [0,1]
                             ▼
-              板块内个股比价排名（point-in-time）
+              板块内个股比价排名
+                P0: same-day（current snapshot）
+                P1: point-in-time（仅 snapshot 启用日起的历史回放）
                             ▼
               PricingSnapshot 表 (board_id, stock_code, trade_date,
-                                  rs_score, cmf, flow_score, total)
+                                  rs_score, cmf[-1,1], flow_score, total[0,1],
+                                  factor_mask, run_id)
+              PricingFactorRun 表 (board_id, trade_date, constituent_basis,
+                                  base_weights_json, effective_weights_json,
+                                  flow_coverage, ...)  ※ 无 UNIQUE，保留多 rerun
                             ▼
               GET /api/v1/plate-pricing/board/{id}/pricing
                 → 板块内个股强弱排序（选股辅助）
 ```
 
-### 23.1 point-in-time 比价快照（防前视）
+> **尺度统一约束（DR4）**：CMF 原始 ∈[-1,1] 必须经 `cmf_score=(cmf+1)/2` 映射到 [0,1] 后方可与 RS/Flow 加权，禁止异尺度直接相加。
+> **重归一化粒度（DR-批次）**：按"板块-交易日"批次判定 Flow 可用性（flow_coverage 阈值），整批禁用或整批启用，避免同榜单不同权重破坏比较性。
+
+### 23.1 比价能力分层（防前视承诺拆分）
+
+> **DR6 修订**：原 §23.1 写法像"历史任意日 D 可无前视回放"，与 §25.1 "仅启用日起积累"矛盾。拆为两条能力声明：
 
 ```
-回算某历史日 D 的比价:
-   constituents = 阶段2 point-in-time 快照(D)  ← 锁定 D 日真实成分股
+能力 A — same-day ranking（P0，phase2 未收敛也可交付）:
+   constituents = legulegu current snapshot  ← 当日实时成分股
+   for stock in constituents:
+       kline = K线截至(今日)
+       rs/cmf/flow 仅基于 ≤今日 的信息
+   → PricingSnapshot(今日)
+   ※ current snapshot 含生存者偏差，仅用于当日选股辅助，不承诺历史无前视
+
+能力 B — historical point-in-time replay（P1，依赖 phase2 成分股每日落盘闭环）:
+   constituents = ConstituentSnapshot(D)  ← 锁定 D 日真实成分股
    for stock in constituents:
        kline = K线截至(D)  ← 仅用 D 及之前数据
-       rs/cmf/flow 仅基于 ≤D 的信息计算
    → PricingSnapshot(D)  无前视偏差
+   ※ 仅对 phase2 save_constituents 启用日及之后的 D 有效；旧历史日不承诺
 ```
 
 ---
@@ -733,62 +757,78 @@ daily_stock_analysis/
 ### 24.1 CMF（Chaikin Money Flow）— 主资金流因子
 
 ```
-输入: 21日 K线 [(high, low, close, volume)...]
-   │
+输入: 20日 K线 [(high, low, close, volume)...]
+   │   ※ 窗口=20（项目默认）。业界口径：StockCharts/pandas_ta 默认20，
+   │      TradingView "通常20或21"，Fidelity 用21；20 更主流，21 是变体，非唯一标准。
    ▼
 for each day:
    mf_multiplier = ((close-low)-(high-close)) / (high-low)
    mf_volume = mf_multiplier × volume
-   │   (high==low 时 mf_multiplier=0，避免除零)
+   │   (high==low 时 mf_multiplier=0，避免除零，不缩短窗口)
    ▼
-CMF(21) = Σ(mf_volume over 21日) / Σ(volume over 21日)
-   │
+CMF(20) = Σ(mf_volume over 20日) / Σ(volume over 20日)
+   │   (Σvolume == 0 时返回 None，非 0：None=因子未定义，0=中性会污染总分)
    ▼
 CMF ∈ [-1, 1]
    >0 资金流入（积聚），<0 资金流出（派发）
+   ※ 进入加权和前必须 cmf_score=(cmf+1)/2 映射到 [0,1]
 ```
 
-> 数据源：`StockRepository.get_range()` 取个股 21 日 K 线（含 volume，本地 StockDaily 已有）；实测 `get_dsa_daily_history("002623")` 可返回 41 根日线并带 `volume`。
+> 数据源：`StockRepository.get_range()` 取个股 20 日 K 线（含 volume，本地 StockDaily 已有）；实测 `get_dsa_daily_history("002623")` 可返回 41 根日线并带 `volume`。
+> 复权一致性：H/L/C 必须同一前复权(qfq)；StockDaily 按(code,date) upsert，phase3 须固定沿用同一日线链路，避免跨 provider 混写导致窗口价量基准漂移。
+> 边界（DR-漏项）：K 线不足 20 根时按实际可用 N 计算（min_period=5）；N<5 → CMF=None。新股、停牌、零成交量日均按上述除零/None 规则处理，不抛异常。
 > 会话调研3：CMF 叠加动量可提升 IR 20-27bp/月。
 
 ### 24.2 相对强弱（RS）
 
 ```
-RS = 个股N日收益 - 板块指数N日收益（或板块均值）
-归一化到 [0,1]（板块内 rank百分位）
-→ 衡量个股相对板块的超额表现
+RS_raw = 个股20日收益 = close_t / close_{t-20} - 1
+归一化: 板块内百分位 rank
+   rs_score = (rank_avg - 1) / (n - 1)   ∈ [0,1]
+   n <= 1 → rs_score = 0.5
+→ 衡量个股在板块内的相对强弱排序
 ```
+
+> **DR5 修订（关键）**：原写法 `个股收益 - 板块指数收益`。但在"板块内 rank 百分位"框架下，同板块同日的板块指数收益对全部个股是常数，**减与不减不改变名次**——即"减板块指数"对排序结果数学上不生效。故 RS 排序输入直接用 `个股20日收益`；`excess_return = 个股收益 - 板块指数收益` 降级为**诊断字段**（保留供分析，不进排序）。
+> **DR8**：N=20，与 CMF(20) 窗口统一。
+> 板块指数基准序列仍由 phase1 `AkshareSwAdapter.get_index_kline` 提供，仅用于 excess_return 诊断，不作为 RS 排序输入。
 
 ### 24.3 资金流代理（适配现有 `capital_flow_context`）
 
 ```
 capital_flow_context(stock).stock_flow
-   = {super_large_net, large_net, medium_net, small_net, ...}
-   │
+   = {main_net_inflow, inflow_5d, inflow_10d}    ※ DR3：真实字段（fundamental_adapter.py:442）
+   │                                              原 §24.3 旧字段 super_large_net/large_net 已废弃
    ▼
 capital_proxy.extract(stock_flow)
-   主力净流入 = super_large_net + large_net
-   归一化（Z-score 或百分位）
+   主力净流入代理 = main_net_inflow
+   归一化: 当日板块内百分位 rank → flow_score ∈ [0,1]
 → Flow_Score
-   ※ capital_flow_context 是个股级、非历史序列（实时快照）
+   ※ capital_flow_context 是个股级、非历史序列（实时/近端快照）
    ※ 仅作辅助因子，非主链路（会话明确"非北向资金替代品"）
+   ※ fail-open 降级（DR-批次）:
+      - 单只失败 → flow_score = None（禁止塞 0.5，0.5 会把"无数据"伪装成"中性"）
+      - 批次级（板块-交易日）flow_coverage < 阈值 → 整批禁用 Flow，对 RS/CMF 动态重归一化
+      - 历史日回算: capital_flow_context 无历史序列，历史日整批 Flow=None
 ```
 
 ---
 
 ## 25. 阶段 3 任务分解（WBS）
 
+> P0/P1 分层：3.1–3.7 属 P0（same-day current snapshot，phase2 未收敛可交付）；历史 point-in-time 回放属 P1（依赖 phase2 成分股每日落盘闭环）。
+
 | ID | 任务 | 依赖 | 验收 |
 |---|---|---|---|
-| **3.0** | `storage.py` 新建 `PricingSnapshot` + `PricingFactorRun` 表 | 无 | 建表成功 |
-| **3.1** | `cmf.py`：CMF(21) 算法（复用 `StockRepository.get_range` K线） | 无 | `pytest test_cmf.py` 输入已知K线断言 CMF 值 |
-| **3.2** | `relative_strength.py`：个股 vs 板块 RS | 阶段1行业指数 K 线 | `pytest test_relative_strength.py` |
-| **3.3** | `capital_proxy.py`：适配 `capital_flow_context.stock_flow`（只读） | 现有 `capital_flow_context` | 主力净流入提取 + 归一化（best-effort） |
-| **3.4** | `pricing_service.py`：三因子组合 + 板块内排名 + point-in-time 快照 | 3.1-3.3, 2.4 | `pytest test_pricing_service.py` 快照落库 |
-| **3.5** | `pricing_repo.py`：PricingSnapshot CRUD + 板块内排名查询 | 3.0 | 查询返回板块内个股排序 |
-| **3.6** | API `plate_pricing.py`：`GET /board/{id}/pricing` | 3.4,3.5 | curl 返回板块内个股比价排名 |
-| **3.7** | 异步任务接入：比价计算并入日终流程（板块内并行） | 3.4 | 日终产出比价快照 |
-| **3.8** | 远端验收：挂载重启 → curl + 查比价表 | 3.0-3.7 | 全流程通过 |
+| **3.0** | 冻结口径：修订需求文档 §22–§28（DR1–DR10 + 漏项），使 CMF 窗口/RS 口径/Flow 字段/尺度统一/批次重归一化自洽 | 无 | 文档无内部矛盾，命令/文件名与实现一致 |
+| **3.1** | `cmf.py`：CMF(20)，high==low→0、Σvol=0→None、复权固定、min_period=5 | 3.0 | `pytest test_cmf.py` 停牌/零量/不足N 不抛错，None 语义正确 |
+| **3.2** | `relative_strength.py`：20日收益板块内百分位（不减指数），n<=1→0.5 | 3.0 | `pytest test_relative_strength.py` rank∈[0,1] |
+| **3.3** | `capital_proxy.py`：适配 main_net_inflow 等真实字段（只读），fail-open→None | 3.0 | 断网不阻断，返回 None |
+| **3.4** | `pricing_service.py`：批次级动态重归一化 + cmf_score=(cmf+1)/2 + RS/CMF 缺→degraded | 3.1-3.3 | Flow 整批禁用时 RS0.625/CMF0.375；RS/CMF 缺→degraded |
+| **3.5** | `pricing_repo.py`：PricingSnapshot upsert + PricingFactorRun（无 UNIQUE，多 rerun）+ 板块内排名查询 | 3.0 | upsert 幂等；排名返回排序；run 可追溯权重 |
+| **3.6** | 成分股读路径：`get_constituents` 缺失时 fallback latest（phase2 收敛后自动升级 point-in-time，无需改码） | 3.4 | 历史日查不到→返回 latest，链路打通 |
+| **3.7** | API `plate_pricing.py` `GET /board/{id}/pricing` + 日终接入 `refresh_daily` 链尾独立 try/except | 3.4-3.6 | curl 返回板块内排名；日终异常隔离不拖垮 v1/v2/rotation 主链 |
+| **3.8** | 远端验收：挂载重启 → sqlite 查表 + curl + 日志 grep | 3.0-3.7 | 同日产比价快照、Flow 失效不压低总分、历史回放声明与真实能力一致 |
 
 ---
 
@@ -796,11 +836,11 @@ capital_proxy.extract(stock_flow)
 
 | 任务 | 所需数据源 | 当前状态 | 说明 |
 |---|---|---|---|
-| **3.1** CMF | 个股 21 日 OHLCV | **已具备** | 复用 `StockRepository.get_range` / DSA 日线链路；实测成分股 `002623` 可返回带 `volume` 的日线数据 |
-| **3.2** RS | 个股日 K + 板块基准序列 | **已具备** | 个股日线已具备；板块基准可直接复用 phase1 申万一级行业指数 K 线 |
-| **3.3** Flow | `capital_flow_context.stock_flow` | **部分具备** | 字段契约已存在（`main_net_inflow` / `inflow_5d` / `inflow_10d`），但它是实时/近端快照，非历史序列；当前环境实测为 fail-open `status=failed`，不能作为历史主链路 |
-| **3.4** 比价快照 | 成分股快照 + 3.1/3.2 + （可选）3.3 | **部分具备** | 若 2.4 已从启用日开始落盘，则可做无前视快照；旧历史日仍受 2.4 限制 |
-| **3.6 / 3.7** API / 日终接入 | 3.4 产物 | **部分具备** | 推荐先以 `RS + CMF` 形成主链路，`Flow` 作为 best-effort 增强 |
+| **3.1** CMF | 个股 20 日 OHLCV | **已具备** | 复用 `StockRepository.get_range` / DSA 日线链路；实测成分股 `002623` 可返回带 `volume` 的日线数据 |
+| **3.2** RS | 个股日 K（板块指数仅做诊断） | **已具备** | 个股日线已具备；板块指数基准由 phase1 `AkshareSwAdapter.get_index_kline` 提供，仅用于 excess_return 诊断字段，不进 RS 排序 |
+| **3.3** Flow | `capital_flow_context.stock_flow` | **部分具备** | 真实字段 `main_net_inflow` / `inflow_5d` / `inflow_10d`；实时/近端快照非历史序列；当前环境实测 fail-open `status=failed`，仅当日 best-effort，不作为历史主链路 |
+| **3.4** 比价快照 | 成分股快照 + 3.1/3.2 + （可选）3.3 | **部分具备** | **P0**：legulegu current snapshot 可做 same-day 排名；**P1**：phase2 `ConstituentSnapshot` 表+repo 已存在，但 `refresh_daily` 未接入 `save_constituents`（phase2 blocking gap），历史 point-in-time 回放需待其收敛 |
+| **3.6 / 3.7** API / 日终接入 | 3.4 产物 | **部分具备** | 先以 `RS + CMF` 形成主链路，`Flow` 作为 best-effort 增强 |
 
 ## 26. 阶段 3 设计决策
 
@@ -811,6 +851,10 @@ capital_proxy.extract(stock_flow)
 | D3.3 | **比价 = 板块内口径**（首期不做跨板块比价） | 会话 I4 明确"板块内个股比价为首期口径" |
 | D3.4 | **point-in-time 复用阶段2成分股快照** | S2=A；阶段2已建，避免重复 |
 | D3.5 | **不涉北向资金**（X2 排除） | 用户明确"暂不考虑" |
+| **D3.6** | **CMF 窗口=20，RS 窗口=20**（项目默认，非业界唯一标准） | DR1：StockCharts/pandas_ta 默认20，21 是变体；窗口统一便于对齐 |
+| **D3.7** | **因子尺度统一后再加权**：`cmf_score=(cmf+1)/2` | DR4：禁止 CMF[-1,1] 与 RS/Flow[0,1] 异尺度直接相加 |
+| **D3.8** | **动态重归一化按"板块-交易日"批次发生**；RS/CMF 缺→degraded | DR-批次：避免同榜单不同权重破坏比较性；RS/CMF 为核心因子，缺一不补 |
+| **D3.9** | **能力分层 P0/P1**：P0 same-day current snapshot；P1 历史 point-in-time 回放 | DR6：拆分承诺，避免过度承诺历史无前视 |
 
 ---
 
@@ -818,9 +862,10 @@ capital_proxy.extract(stock_flow)
 
 | # | 问题 | 建议默认 |
 |---|---|---|
-| C3.1 | 比价综合分权重（RS / CMF / Flow）？ | 默认 0.5 / 0.3 / 0.2，配置化可调 |
-| C3.2 | 相对强弱基准：板块指数 vs 板块成分均值？ | **基于已实现 phase1，默认先用板块指数**；待 2.4 成分股快照稳定后，再评估切到板块成分均值 |
+| C3.1 | 比价综合分权重（RS / CMF / Flow）？ | 默认 0.5 / 0.3 / 0.2，配置化可调；批次级缺失时按 D3.8 动态重归一化 |
+| C3.2 | ~~相对强弱基准：板块指数 vs 板块成分均值？~~ **【DR5 已澄清】** | 板块内 rank 百分位框架下，"减板块指数"对排序**数学上不生效**（同板块同日是常数）。RS 排序直接用个股20日收益；板块指数降级为 excess_return **诊断字段**。本项不再作为待确认 |
 | C3.3 | 比价快照保留周期（S9）？ | 默认全保留（磁盘便宜），后续按需冷热分层 |
+| C3.4 | Flow 批次级 flow_coverage 阈值？ | 默认 0.6（低于则整批禁用 Flow，对 RS/CMF 重归一化）；可配置 |
 
 ---
 
@@ -840,14 +885,53 @@ capital_proxy.extract(stock_flow)
   └─ v2 打分引擎 ───────────────────┤
                                     ▼
 阶段3 (比价系统)                    │ 复用阶段1板块 SPI/指数基础 + 阶段2成分股快照
-  ├─ CMF 因子 ◄─ StockRepository.get_range (现有)
-  ├─ 相对强弱 ◄─ 板块指数（默认） / 板块均值（快照稳定后可选）
-  ├─ 资金流代理 ◄─ capital_flow_context (只读适配)
-  └─ 板块内比价排名 + point-in-time 快照
+  ├─ CMF(20) 因子 ◄─ StockRepository.get_range (现有)
+  ├─ 相对强弱 RS(20) ◄─ 个股20日收益板块内百分位（板块指数仅做 excess_return 诊断）
+  ├─ 资金流代理 Flow ◄─ capital_flow_context (只读适配，当日 best-effort)
+  └─ 板块内比价排名 + 快照（P0 same-day / P1 历史 point-in-time）
 ```
 
 **全周期置信度**：High。三阶段目录/数据流/算法均锚定 DSA 现有范式 + Java 源码 + 会话调研结论。
 **累计新建文件**：阶段1 以 `src/services/spi/` 与 `plate_spi` API 为主；现有文件改动集中在 `storage.py`、`main.py`、`plate_spi.py` 与路由聚合，保持对既有业务零侵入。
+
+---
+
+## 28.1 阶段3 双模型规划审计决议（Gemini + Codex，2026-07-03）
+
+> 经 `codeagent-wrapper` 调 Gemini-2.5-pro 与 Codex 双模型独立审计（Codex 118 事件含 web_search 交叉验证 CMF 业界标准 + 逐文件源码定位），
+> 双方互补揪出 §22–§28 共 **10 处契约漂移 + 3 处漏项**，已全部回填上文（DR1–DR10）。本节为审计结论归档，对 §22–§28 构成约束性更新。
+> 原始产物：`.ccg/tasks/spi-rotation-phase3/research/{gemini,codex}-analysis.md`。
+
+### 28.1.1 契约漂移修订（DR1–DR10）
+
+| # | 漂移 | 修订 | 裁定来源 |
+|---|---|---|---|
+| DR1 | CMF(21) | **CMF(20)**，标注"项目默认非业界唯一标准" | Codex web_search 4 源（StockCharts/pandas_ta 默认20） |
+| DR2 | Σvolume=0 → CMF=0 | **→ None**（未定义而非中性） | Codex |
+| DR3 | Flow 旧字段 super_large_net/large_net | **main_net_inflow/inflow_5d/inflow_10d**（fundamental_adapter.py:442） | H-3 + Codex |
+| DR4 | CMF[-1,1] 与 RS/Flow[0,1] 直接加权和 | **cmf_score=(cmf+1)/2** 尺度统一后再加权 | Codex |
+| DR5 | RS "减板块指数" 进排序 | **rank 框架下不减**（数学冗余）；excess_return 降级诊断字段 | Codex 数学论证 |
+| DR6 | §23.1 vs §25.1 历史回放承诺矛盾 | 拆 P0 same-day / P1 历史 point-in-time 两条能力 | Codex |
+| DR7 | §23 "AlphaSift 成分股链路" | 实现为 **legulegu**（constituents_snapshot.py:18） | Codex |
+| DR8 | RS 窗口 N 未定 | **N=20**（与 CMF 统一） | 综合 |
+| DR9 | Flow_norm 口径不清 | 板块内百分位，**仅当日有效；历史日整批 None** | Codex |
+| DR10 | WBS 无 rerun 审计 | **PricingFactorRun 表**（无 UNIQUE，存 effective_weights_json） | Codex |
+
+### 28.1.2 新增漏项
+
+- RS/CMF 不足 N、新股、停牌、零成交量、n<=1→0.5 的处理契约（已补 §24.1/§24.2）
+- Flow 批次级 flow_coverage 阈值（C3.4，默认 0.6）
+- rerun 审计口径（PricingFactorRun，DR10）
+
+### 28.1.3 P0/P1 分层（用户已确认 CMF(20) + 先修文档）
+
+- **P0**（phase2 未收敛可交付）：same-day 板块内比价 = RS(20) + CMF(20) 主链 + Flow 当日 best-effort，legulegu current snapshot 成分股
+- **P1**（依赖 phase2 `refresh_daily` 接入 `save_constituents`）：历史 point-in-time 回放（无前视），phase2 收敛后 phase3 无需改码自动升级
+
+### 28.1.4 模型表现差异
+
+Codex 发现 4 个 Gemini 盲点：CMF 业界标准（21 vs 20）、§24.3 字段漂移、RS 减指数数学冗余、Alembic 漂移（DSA 实际用 `Base.metadata.create_all()`）。
+Gemini 在表字段设计/伪代码/远端验收清单上有独立复用价值。双模型交叉显著优于单模型。
 
 ---
 ---

@@ -11,7 +11,7 @@ class AlignmentFactor(SpiFactor):
         self.weight = weight
 
     def compute(self, ema_series: dict, last_close: float) -> float:
-        available = [p for p in _ORDERED_PERIODS if p in ema_series]
+        available = [p for p in _ORDERED_PERIODS if ema_series.get(p)]
         if len(available) < 2:
             return 0.0
         satisfied = sum(

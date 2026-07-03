@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 from datetime import date
-from typing import Optional, List
+from typing import Dict, List, Optional
 
 from sqlalchemy import and_, select, desc
 
@@ -215,3 +215,32 @@ class PlateSpiRepository:
                 }
                 for r in rows
             ]
+
+    def find_active_rotation_positions(self, *, before_date: date) -> Dict[int, List[str]]:
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(SpiRotationSignal)
+                .where(SpiRotationSignal.trade_date < before_date)
+                .order_by(
+                    desc(SpiRotationSignal.trade_date),
+                    desc(SpiRotationSignal.id),
+                )
+            ).scalars().all()
+
+        latest_actions = {}
+        for row in rows:
+            key = (row.board_id, row.stock_code)
+            if key in latest_actions:
+                continue
+            latest_actions[key] = row.action
+
+        active_positions: Dict[int, List[str]] = {}
+        for (board_id, stock_code), action in latest_actions.items():
+            if action != "BUY":
+                continue
+            active_positions.setdefault(board_id, []).append(stock_code)
+
+        for stock_codes in active_positions.values():
+            stock_codes.sort()
+
+        return active_positions

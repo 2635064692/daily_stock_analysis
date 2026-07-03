@@ -39,7 +39,7 @@ def cal_index_spi(close_series, periods=PERIODS):
 
 def ema_for_spi_v2(close_series, periods=PERIODS):
     """Return full EMA series for each period (for v2 factors: direction/alignment/separation/compression).
-    Same SMA-seed recurrence as ema_for_spi. Output list length = len(close_series) - period.
+    Same SMA-seed recurrence as ema_for_spi. Output list length = len(close_series) - period + 1.
     Skips period if len(close_series) < period. Empty input → {}."""
     closes = list(close_series)
     n = len(closes)
@@ -50,10 +50,10 @@ def ema_for_spi_v2(close_series, periods=PERIODS):
         seed = sum(closes[:period]) / period
         prev = seed
         k1 = 2 / (period + 1)
-        series = []
+        series = [float(seed)]
         for i in range(period, n):
             prev = (closes[i] - prev) * k1 + prev
-            series.append(prev)
+            series.append(float(prev))
         out[period] = series
     return out
 

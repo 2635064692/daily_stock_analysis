@@ -176,12 +176,12 @@ class TestEmaForSpiV2:
         s = _make_linear_series(250)
         result = ema_for_spi_v2(s)
         for period, lst in result.items():
-            assert len(lst) == 250 - period
+            assert len(lst) == 250 - period + 1
 
     def test_insufficient_period_excluded(self):
         result = ema_for_spi_v2(list(range(10)))
         assert 5 in result
-        assert len(result[5]) == 5
+        assert len(result[5]) == 6
         for p in [13, 21, 34, 55, 89, 144, 233]:
             assert p not in result
 
@@ -202,6 +202,11 @@ class TestEmaForSpiV2:
         for period in scalar_map:
             assert abs(series_map[period][-1] - scalar_map[period]) < 1e-9
 
+    def test_exact_period_returns_seed_value(self):
+        closes = [10, 11, 12, 13, 14]
+        result = ema_for_spi_v2(closes, periods=[5])
+        assert result == {5: [sum(closes) / 5]}
+
 
 # ── cal_stock_spi_v2 ─────────────────────────────────────
 class TestCalStockSpiV2:
@@ -214,3 +219,7 @@ class TestCalStockSpiV2:
 
     def test_empty_series_returns_zero(self):
         assert cal_stock_spi_v2([]) == 0.0
+
+    def test_exact_period_series_does_not_crash(self):
+        score = cal_stock_spi_v2([1, 2, 3, 4, 5], periods=[5])
+        assert 0.0 <= score <= 100.0

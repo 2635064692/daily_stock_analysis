@@ -1,12 +1,12 @@
 {
   "id": "spi-rotation-phase2",
   "title": "SPI 板块轮动系统 阶段2：SPI v2 + 轮动闭环（v2 因子 + 成分股快照 + 轮动信号）",
-  "status": "in_progress",
+  "status": "completed",
   "strategy": "full-collaborate",
-  "currentPhase": "1-planning",
-  "taskPhase": "",
-  "nextAction": "p1/p2 全部完成(7/8)，等待 dev-audit(#1) 解锁 p3 剩余 3 个任务(#9/#10/#11)",
-  "gate": null,
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "P0/P1 review blockers resolved; targeted py_compile/flake8/pytest passed. Optional next step: API/TestClient smoke for /plate-spi/v2/rankings and /plate-spi/rotation/signals.",
+  "gate": "passed",
   "branch": "docs/grok-search-and-alphasift",
   "scope": "spi-rotation-phase2",
   "createdAt": "2026-07-03T00:00:00+08:00"
