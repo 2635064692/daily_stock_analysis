@@ -1,0 +1,1 @@
+[{"phase":"5-review","next":"Review found blocking gaps: missing constituent snapshot write path, unreachable rank-drop exit path, ema_for_spi_v2 exact-period crash, and unused rotation YAML; fix before close-out.","ts":1783082921665}]
