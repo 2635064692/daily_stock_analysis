@@ -1079,6 +1079,35 @@ class DecisionSignalFeedbackRecord(Base):
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
 
 
+class PlateSpiSnapshot(Base):
+    __tablename__ = 'plate_spi_snapshot'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    spi = Column(Integer, nullable=False)
+    confidence = Column(String(16), nullable=False, default='normal')
+    coverage = Column(Float)
+    board_name = Column(String(32), nullable=True)
+    updated_at = Column(DateTime, default=utc_naive_now)
+
+    __table_args__ = (
+        UniqueConstraint('board_id', 'trade_date', name='uq_plate_spi_snapshot_board_date'),
+    )
+
+
+class SpiBackfillTaskRun(Base):
+    __tablename__ = 'spi_backfill_task_run'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_type = Column(String(16), nullable=False)
+    start_date = Column(Date)
+    end_date = Column(Date)
+    board_count = Column(Integer)
+    task_queue_id = Column(String(64), index=True)
+    created_at = Column(DateTime, default=utc_naive_now)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

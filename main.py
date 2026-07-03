@@ -1446,6 +1446,11 @@ def main() -> int:
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
                 run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                try:
+                    from src.services.spi.spi_task_runner import SpiTaskRunner
+                    SpiTaskRunner().refresh_daily()
+                except Exception as e:
+                    logger.error(f"SPI daily refresh failed: {e}")
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):

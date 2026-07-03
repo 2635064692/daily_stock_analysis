@@ -1,0 +1,13 @@
+{
+  "id": "spi-rotation-phase1",
+  "title": "SPI 板块轮动系统 阶段1：SPI v1 原逻辑迁移（选股宝适配 + SPI 计算 + 快照表 + 异步回算 + API）",
+  "status": "in_progress",
+  "strategy": "full-collaborate",
+  "currentPhase": "4-implementation",
+  "taskPhase": "1;2;3;4;5",
+  "nextAction": "Layer1(T1/T2)已完成→spawn Layer2: T3建表/T4 spi_calculator/T5 xuangubao_adapter/T6 repo（T6待T3）",
+  "gate": null,
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "spi-rotation-phase1",
+  "createdAt": "2026-07-02T22:32:42+08:00"
+}

@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"path\", \"reason\": \"why\"}. Seed rows are skipped."}
+{"file": "docs/product-specs/spi-rotation-pricing-requirement-boundary.md", "reason": "需求边界文档，§12 阶段1 WBS + §29 多模型审查修订为本任务唯一权威依据"}
+{"file": "CLAUDE.md", "reason": "本机仅代码分析/修改+git push，验收全在远端（§1/§5.3）；代码风格精简无冗余（0.2）"}
+{"file": ".ccg/tasks/spi-rotation-phase1/builder-context.md", "reason": "Builder 共享上下文：主控已验证的关键范式（建表/队列/读源/路由/定时）+ 文件归属锁（一文件一写者）+ 依赖图"}
+{"file": ".ccg/tasks/spi-rotation-phase1/connectivity-report.md", "reason": "T1 产出：选股宝4接口协议蓝本（URL/参数/响应/字段映射/鉴权/限流），T5 xuangubao_adapter.py 编码依据；§6 远端实测待补但不阻塞"}
