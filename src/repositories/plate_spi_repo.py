@@ -5,10 +5,13 @@ from typing import Optional, List
 
 from sqlalchemy import and_, select, desc
 
+from sqlalchemy.exc import IntegrityError
+
 from src.storage import (
     DatabaseManager,
     PlateSpiSnapshot,
     SpiBackfillTaskRun,
+    SpiRotationSignal,
     utc_naive_now,
 )
 
@@ -134,3 +137,81 @@ class PlateSpiRepository:
             for row in rows:
                 session.delete(row)
             session.commit()
+
+    def upsert_v2_score(self, *, board_id: int, trade_date: date, v2_score: float) -> None:
+        with self.db.get_session() as session:
+            existing = session.execute(
+                select(PlateSpiSnapshot).where(
+                    and_(
+                        PlateSpiSnapshot.board_id == board_id,
+                        PlateSpiSnapshot.trade_date == trade_date,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                return
+            existing.v2_score = v2_score
+            existing.updated_at = utc_naive_now()
+            session.commit()
+
+    def find_top_boards_v2(self, *, anchor_date: date, top_n: int = 30) -> List[dict]:
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(PlateSpiSnapshot)
+                .where(
+                    and_(
+                        PlateSpiSnapshot.trade_date == anchor_date,
+                        PlateSpiSnapshot.v2_score.isnot(None),
+                        PlateSpiSnapshot.spi != -1,
+                    )
+                )
+                .order_by(desc(PlateSpiSnapshot.v2_score))
+                .limit(top_n)
+            ).scalars().all()
+            return [
+                {
+                    "board_id": r.board_id,
+                    "board_name": r.board_name,
+                    "spi": r.spi,
+                    "v2_score": r.v2_score,
+                }
+                for r in rows
+            ]
+
+    def upsert_rotation_signal(
+        self, *, board_id: int, stock_code: str, trade_date: date,
+        action: str, reason: str = "",
+    ) -> None:
+        with self.db.get_session() as session:
+            try:
+                session.add(SpiRotationSignal(
+                    board_id=board_id,
+                    stock_code=stock_code,
+                    trade_date=trade_date,
+                    action=action,
+                    reason=reason,
+                ))
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+
+    def find_rotation_signals(
+        self, *, trade_date: date, board_id: Optional[int] = None,
+    ) -> List[dict]:
+        conditions = [SpiRotationSignal.trade_date == trade_date]
+        if board_id is not None:
+            conditions.append(SpiRotationSignal.board_id == board_id)
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(SpiRotationSignal).where(and_(*conditions))
+            ).scalars().all()
+            return [
+                {
+                    "board_id": r.board_id,
+                    "stock_code": r.stock_code,
+                    "trade_date": r.trade_date,
+                    "action": r.action,
+                    "reason": r.reason,
+                }
+                for r in rows
+            ]

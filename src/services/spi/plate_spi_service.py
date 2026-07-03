@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 from src.services.spi.akshare_sw_adapter import AkshareSwAdapter
-from src.services.spi.spi_calculator import cal_index_spi
+from src.services.spi.spi_calculator import cal_index_spi, cal_stock_spi_v2
 from src.services.spi.spi_time import spi_time
 from src.repositories.plate_spi_repo import PlateSpiRepository
 
@@ -100,3 +100,59 @@ class PlateSpiService:
             "success": success,
             "low_confidence": low_confidence,
         }
+
+    # ------------------------------------------------------------------
+    # v2 single board
+    # ------------------------------------------------------------------
+
+    def compute_board_spi_v2(self, board_id_str: str, anchor_date: date) -> tuple:
+        """Returns (board_id_int, v2_score_or_None)."""
+        board_id_int = int(board_id_str)
+        try:
+            klines = self.adapter.get_index_kline(
+                board_id_str,
+                back_count=300,
+                end_date=anchor_date,
+            )
+            if not klines:
+                return (board_id_int, None)
+            closes = [k["close"] for k in klines]
+            if len(closes) < 5:
+                return (board_id_int, None)
+            score = cal_stock_spi_v2(closes)
+            self.repo.upsert_v2_score(
+                board_id=board_id_int,
+                trade_date=anchor_date,
+                v2_score=score,
+            )
+            return (board_id_int, score)
+        except Exception:
+            logger.warning("board %s v2 compute failed", board_id_str, exc_info=True)
+            return (board_id_int, None)
+
+    # ------------------------------------------------------------------
+    # v2 full refresh
+    # ------------------------------------------------------------------
+
+    def refresh_all_v2(self, anchor_date: date | None = None) -> dict:
+        anchor_date = anchor_date or spi_time()
+        boards = self.adapter.get_sw_first_levels()
+        if not boards:
+            return {"success": 0, "total": 0}
+
+        success = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self.compute_board_spi_v2, b["board_id"], anchor_date): b["board_id"]
+                for b in boards
+            }
+            for future in as_completed(futures):
+                bid = futures[future]
+                try:
+                    _, v2_score = future.result()
+                    if v2_score is not None:
+                        success += 1
+                except Exception:
+                    logger.warning("board %s v2 future failed", bid, exc_info=True)
+
+        return {"success": success, "total": len(boards)}

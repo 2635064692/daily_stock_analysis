@@ -112,3 +112,43 @@ def test_backfill_history_cleans_up_metadata_when_submit_fails():
 
     task_repo.create_backfill_task_run.assert_called_once()
     task_repo.delete_backfill_task_run.assert_called_once()
+
+
+def test_refresh_daily_v2_exception_does_not_affect_v1():
+    queue = ImmediateQueue()
+    service = MagicMock()
+    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
+    service.refresh_all_v2.side_effect = RuntimeError("v2 exploded")
+    runner = SpiTaskRunner(queue=queue, service=service, task_repo=MagicMock())
+
+    with patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)):
+        task_id = runner.refresh_daily()
+
+    assert task_id is not None
+    service.refresh_all.assert_called_once_with(anchor_date=date(2026, 7, 3))
+
+
+def test_refresh_daily_rotation_skipped_when_no_constituents():
+    queue = ImmediateQueue()
+    service = MagicMock()
+    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
+    service.refresh_all_v2.return_value = {"success": 31, "total": 31}
+
+    rotation_mock = MagicMock()
+    rotation_mock.update_watchpool.return_value = {801010}
+
+    constituent_repo_mock = MagicMock()
+    constituent_repo_mock.get_constituents.return_value = []
+
+    runner = SpiTaskRunner(queue=queue, service=service, task_repo=MagicMock())
+
+    with (
+        patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)),
+        patch("src.services.spi.rotation_service.RotationService", return_value=rotation_mock),
+        patch("src.utils.constituents_snapshot.ConstituentSnapshotRepo", return_value=constituent_repo_mock),
+    ):
+        task_id = runner.refresh_daily()
+
+    assert task_id is not None
+    rotation_mock.check_entry.assert_not_called()
+    rotation_mock.check_exit.assert_not_called()

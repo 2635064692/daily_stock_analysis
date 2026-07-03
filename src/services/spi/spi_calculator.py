@@ -35,3 +35,36 @@ def cal_index_spi(close_series, periods=PERIODS):
         return -1
     last_close = list(close_series)[-1]
     return cal_stock_spi(last_close, ema_map)
+
+
+def ema_for_spi_v2(close_series, periods=PERIODS):
+    """Return full EMA series for each period (for v2 factors: direction/alignment/separation/compression).
+    Same SMA-seed recurrence as ema_for_spi. Output list length = len(close_series) - period.
+    Skips period if len(close_series) < period. Empty input → {}."""
+    closes = list(close_series)
+    n = len(closes)
+    out = {}
+    for period in periods:
+        if n < period:
+            continue
+        seed = sum(closes[:period]) / period
+        prev = seed
+        k1 = 2 / (period + 1)
+        series = []
+        for i in range(period, n):
+            prev = (closes[i] - prev) * k1 + prev
+            series.append(prev)
+        out[period] = series
+    return out
+
+
+def cal_stock_spi_v2(close_series, periods=PERIODS):
+    """v2 continuous SPI score via SpiScorer. Returns float in [0, 100]. Returns 0.0 if no EMA data."""
+    closes = list(close_series)
+    if not closes:
+        return 0.0
+    ema_series = ema_for_spi_v2(closes, periods)
+    if not ema_series:
+        return 0.0
+    from src.services.spi.spi_scorer import SpiScorer
+    return SpiScorer().score(ema_series, closes[-1])

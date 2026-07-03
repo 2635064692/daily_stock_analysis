@@ -1089,6 +1089,7 @@ class PlateSpiSnapshot(Base):
     confidence = Column(String(16), nullable=False, default='normal')
     coverage = Column(Float)
     board_name = Column(String(32), nullable=True)
+    v2_score = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=utc_naive_now)
 
     __table_args__ = (
@@ -1106,6 +1107,36 @@ class SpiBackfillTaskRun(Base):
     board_count = Column(Integer)
     task_queue_id = Column(String(64), index=True)
     created_at = Column(DateTime, default=utc_naive_now)
+
+
+class SpiRotationSignal(Base):
+    __tablename__ = 'spi_rotation_signal'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, nullable=False, index=True)
+    stock_code = Column(String(10), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    action = Column(String(4), nullable=False)
+    reason = Column(String(255))
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('board_id', 'stock_code', 'trade_date', 'action', name='uq_rotation_signal'),
+    )
+
+
+class ConstituentSnapshot(Base):
+    __tablename__ = 'constituent_snapshot'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    stock_codes_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('board_id', 'trade_date', name='uq_constituent_snapshot'),
+    )
 
 
 class _DatabaseManagerMeta(type):
@@ -1189,6 +1220,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # 创建所有表
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
+            self._ensure_spi_v2_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1389,6 +1421,29 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                             time.sleep(delay)
                         continue
                     raise
+
+    def _ensure_spi_v2_columns(self) -> None:
+        """Add v2_score column to plate_spi_snapshot on existing SQLite DBs."""
+        if not self._is_sqlite_engine:
+            return
+        try:
+            existing = {
+                column["name"]
+                for column in inspect(self._engine).get_columns(PlateSpiSnapshot.__tablename__)
+            }
+        except Exception as exc:
+            logger.warning("[SPI v2] failed to inspect plate_spi_snapshot columns: %s", exc)
+            return
+        if "v2_score" in existing:
+            return
+        try:
+            with self._engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {PlateSpiSnapshot.__tablename__} ADD COLUMN v2_score FLOAT"
+                )
+        except OperationalError as exc:
+            if not self._is_sqlite_duplicate_column_error(exc, "v2_score"):
+                raise
 
     def _ensure_intelligence_item_scope_values(self) -> None:
         """Backfill nullable intelligence item scopes so SQLite unique keys work."""

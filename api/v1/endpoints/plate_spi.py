@@ -84,3 +84,51 @@ def get_spi_rankings(
         ]
         result.append(entry)
     return {"anchor_date": anchor.isoformat(), "top_n": top_n, "boards": result}
+
+
+@router.get("/v2/rankings")
+def get_spi_v2_rankings(
+    date_param: Optional[date] = Query(None, alias="date"),
+    top_n: int = Query(30, ge=1, le=100),
+    days: int = Query(100, ge=1, le=365),
+) -> Dict[str, Any]:
+    anchor = date_param or spi_time()
+    repo = PlateSpiRepository()
+    boards = repo.find_top_boards_v2(anchor_date=anchor, top_n=top_n)
+    result = []
+    for b in boards:
+        series = repo.find_board_series(board_id=b["board_id"], days=days)
+        result.append({
+            "board_id": b["board_id"],
+            "board_name": b["board_name"],
+            "spi": b["spi"],
+            "v2_score": b["v2_score"],
+            "series": [
+                {"date": s.trade_date.isoformat(), "spi": s.spi}
+                for s in series
+            ],
+        })
+    return {"date": anchor.isoformat(), "boards": result}
+
+
+@router.get("/rotation/signals")
+def get_rotation_signals(
+    date_param: Optional[date] = Query(None, alias="date"),
+    board_id: Optional[int] = Query(None),
+) -> Dict[str, Any]:
+    anchor = date_param or spi_time()
+    repo = PlateSpiRepository()
+    signals = repo.find_rotation_signals(trade_date=anchor, board_id=board_id)
+    return {
+        "date": anchor.isoformat(),
+        "signals": [
+            {
+                "board_id": s["board_id"],
+                "stock_code": s["stock_code"],
+                "trade_date": s["trade_date"].isoformat(),
+                "action": s["action"],
+                "reason": s["reason"],
+            }
+            for s in signals
+        ],
+    }

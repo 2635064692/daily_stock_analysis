@@ -10,7 +10,7 @@ from datetime import date
 from src.repositories.plate_spi_repo import PlateSpiRepository
 from src.services.task_queue import AnalysisTaskQueue
 from src.services.spi.plate_spi_service import PlateSpiService
-from src.services.spi.spi_time import iter_trading_dates
+from src.services.spi.spi_time import iter_trading_dates, spi_time
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,27 @@ class SpiTaskRunner:
 
     def refresh_daily(self) -> str:
         def _run():
-            return self.service.refresh_all()
+            anchor_date = spi_time()
+            self.service.refresh_all(anchor_date=anchor_date)
+
+            try:
+                self.service.refresh_all_v2(anchor_date=anchor_date)
+            except Exception as exc:
+                logger.warning("v2 refresh failed, skipping: %s", exc)
+
+            try:
+                from src.services.spi.rotation_service import RotationService
+                from src.utils.constituents_snapshot import ConstituentSnapshotRepo
+                rotation = RotationService()
+                watchpool = rotation.update_watchpool(anchor_date)
+                for board_id in watchpool:
+                    constituents = ConstituentSnapshotRepo().get_constituents(board_id, anchor_date)
+                    if not constituents:
+                        continue
+                    rotation.check_entry(board_id, anchor_date)
+                    rotation.check_exit(board_id, anchor_date)
+            except Exception as exc:
+                logger.warning("rotation signal generation failed, skipping: %s", exc)
 
         return self._submit_spi_task(
             run_task=_run,

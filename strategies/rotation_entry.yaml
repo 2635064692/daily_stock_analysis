@@ -1,0 +1,33 @@
+# SPI v2 板块轮动入场/出场策略参数
+# Rotation Entry / Exit Strategy for SPI v2 Rotation System
+
+name: rotation_entry
+display_name: 板块轮动入场与出场
+description: SPI v2 板块轮动入场（回踩均线）、出场（跌破/排名下滑）及观察池容量参数。
+category: rotation
+core_rules: [1, 2]
+required_tools:
+  - spi_calculator
+  - constituents_snapshot
+aliases: [轮动, 板块轮动, 入场出场]
+default_active: true
+default_priority: 5
+market_regimes: [trending_up, ranging]
+
+entry:
+  # 回踩均线周期（日），成分股收盘价回踩至此均线视为支撑位
+  ema_period: 20
+  # 量比阈值 — 量比 > 此值视为有效放量确认
+  volume_ratio_threshold: 1.2
+  # 回踩容忍度 — last_close <= EMA * (1 + tolerance) 即触发入场条件
+  pullback_tolerance: 0.02
+
+exit:
+  # 板块 SPI v2 排名跌出 Top M 时触发板块级出场信号
+  top_m: 50
+  # 个股跌破此 EMA 周期时触发个股级出场信号
+  ema_period: 5
+
+watchpool:
+  # 观察池容量 — v2_score 前 N 个板块进入观察池
+  top_n: 30

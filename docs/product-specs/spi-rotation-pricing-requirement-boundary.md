@@ -107,7 +107,7 @@ DSA（Python，FastAPI）当前只有个股级分析与当日板块涨跌幅排�
 - [x] 错误/失败流：无效板块 -1 哨兵、数据源降级 fallback、任务 failed 状态
 - [x] 数据生命周期：快照 upsert、point-in-time 锁定、保留周期(S9/R14)
 - [x] 非功能需求：并行(S10)、可观测性(S12)、不缓存(X5)
-- [x] 集成点：选股宝(新)、三个现有函数(只读)、任务队列/API异步(复用)
+- [x] 集成点：行业指数适配层（已实现）、成分股链路（AlphaSift 现有能力，可扩展）、三个现有函数(只读)、任务队列/API异步(复用)
 - [x] 已知演进向量：因子可插拔(S17)支撑未来加因子
 - [x] 排除项明确：前端/北向/缠论/回测/缓存 全部列入 Out-of-Scope
 
@@ -453,7 +453,7 @@ daily_stock_analysis/
 ## 16. SPI v2 因子数据流
 
 ```
-成分股日K线 (close/high/low 序列，阶段2补齐成分股链路后可取)
+成分股日K线 (close/high/low 序列；当前可通过 AlphaSift 成分股列表 + DSA 日线链路获取)
    │
    ▼
 ema_for_spi_v2(close_series)
@@ -483,6 +483,9 @@ cal_stock_spi_v2 单股 v2 分 → 板块聚合（阶段2 自建成分股编排�
    ▼
 PlateSpiSnapshot.v2_score 列（ALTER TABLE 加列）
 ```
+
+> 基于已实现 phase1：**若阶段2先只落地板块级 `v2_score`**，可直接复用 phase1 已有的申万一级行业指数 K 线，不必等待 `2.4 constituents_snapshot`。
+> 成分股链路只在 **轮动闭环（观察池/入场/出场）** 和后续 **板块内选股** 中成为硬依赖。
 
 ---
 
@@ -596,14 +599,27 @@ SpiScorer.score():
 | **2.1** | `spi_factors/` 4 因子模块 + registry（S17 可插拔） | 无 | `pytest test_spi_factors.py` 各因子输出范围正确 |
 | **2.2** | `SpiScorer` 打分引擎（加权和默认 + 归一化） | 2.1 | `pytest test_spi_scorer.py` 权重变更反映到分数 |
 | **2.3** | `spi_calculator` 升级 `ema_for_spi` 返回序列 + `cal_stock_spi_v2` 接入因子链 | 2.1,2.2 | v2 板块快照落库，v2_score ∈ [0,100] |
-| **2.4** | `constituents_snapshot` point-in-time 成分股锁定（S2） | 阶段1选股宝 | 历史快照锁定该交易日名单，回算不前视 |
+| **2.4** | `constituents_snapshot` point-in-time 成分股锁定（S2） | 现有 AlphaSift 成分股链路 | 从启用日开始按交易日落盘真实名单；旧历史日不承诺回补真实名单 |
 | **2.5** | `rotation_service`：观察池 + 入场（回踩）+ 出场信号 | 2.3,2.4 | `pytest test_rotation_service.py` 信号触发正确 |
 | **2.6** | `rotation_entry.yaml` 策略配置（回踩均线参数可调） | 2.5 | YAML 加载，参数生效 |
-| **2.7** | API：`/rotation/signals` `/v2/rankings` | 2.5 | curl 返回信号列表 + v2 排名 |
-| **2.8** | 日终任务扩展：v2 计算 + 轮动信号生成并入阶段1日终流程 | 2.3,2.5 | 日终产出 v2 快照 + 当日信号 |
+| **2.7** | API：`/rotation/signals` `/v2/rankings` | 2.5 | `v2/rankings` 可先独立上线；`rotation/signals` 随 2.5 一起验收 |
+| **2.8** | 日终任务扩展：v2 计算 + 轮动信号生成并入阶段1日终流程 | 2.3,2.5 | 日终至少稳定产出 v2 快照；信号生成取决于 2.4 成分股快照已落盘 |
 | **2.9** | 远端验收：挂载重启 → curl + 查信号表 | 2.0-2.8 | 全流程通过 |
 
 ---
+
+## 19.1 阶段 2 数据源可达性审计（基于已实现 phase1）
+
+| 任务 | 所需数据源 | 当前状态 | 说明 |
+|---|---|---|---|
+| **2.1 / 2.2** 因子模块 / 打分器 | 无新增外部数据源 | **已具备** | 纯计算层，直接基于 `ema_for_spi` 输出扩展 |
+| **2.3** v2 板块评分 | phase1 行业指数历史 K 线 | **已具备** | phase1 已有 `AkshareSwAdapter.get_index_kline`；实测可返回 `801010` 最近 10 根指数 K 线 |
+| **2.4** 成分股快照 | 板块/题材 → 成分股列表 | **部分具备** | 当前有 AlphaSift 概念/行业成分股链路；概念题材实测可返回多只成分股，但申万一级行业名与现有成分股源命名体系不完全对齐，部分仅退化到单只龙头兜底 |
+| **2.4** 历史 point-in-time | 历史日真实成分股名单 | **未具备（仅可从启用日开始积累）** | 现有链路只能稳定拿到“当前快照”；历史真实名单需由阶段2 自建 `constituents_snapshot` 每日落盘 |
+| **2.5** 轮动信号 | 成分股列表 + 成分股日 K + v2 评分 | **部分具备** | 成分股个股日 K 可通过 DSA 现有 `get_daily_history` / `StockRepository` 获取；当前日或启用后日可做，旧历史回放依赖 2.4 快照积累 |
+| **2.7** `v2/rankings` | phase1 指数 SPI / v2_score | **已具备** | 不依赖成分股快照，可先上线 |
+| **2.7** `rotation/signals` | 2.5 轮动信号结果 | **部分具备** | 取决于 2.4 / 2.5 是否完成 |
+| **2.8** 日终任务扩展 | 指数 K 线 + （可选）成分股快照 | **部分具备** | v2 快照部分可先接入；轮动信号部分需等 2.4/2.5 完整闭环 |
 
 ## 20. 阶段 2 设计决策
 
@@ -674,7 +690,7 @@ daily_stock_analysis/
 ## 23. 比价系统数据流
 
 ```
-板块成分股（阶段1选股宝 / 阶段2 point-in-time 快照）
+板块成分股（当前 AlphaSift 成分股链路的 current snapshot / 阶段2 point-in-time 快照）
    │
    ▼  对每个成分股
 ┌──────────────────────── 并行 ────────────────────────┐
@@ -732,7 +748,7 @@ CMF ∈ [-1, 1]
    >0 资金流入（积聚），<0 资金流出（派发）
 ```
 
-> 数据源：`StockRepository.get_range()` 取个股 21 日 K 线（含 volume，本地 StockDaily 已有）。
+> 数据源：`StockRepository.get_range()` 取个股 21 日 K 线（含 volume，本地 StockDaily 已有）；实测 `get_dsa_daily_history("002623")` 可返回 41 根日线并带 `volume`。
 > 会话调研3：CMF 叠加动量可提升 IR 20-27bp/月。
 
 ### 24.2 相对强弱（RS）
@@ -766,9 +782,9 @@ capital_proxy.extract(stock_flow)
 |---|---|---|---|
 | **3.0** | `storage.py` 新建 `PricingSnapshot` + `PricingFactorRun` 表 | 无 | 建表成功 |
 | **3.1** | `cmf.py`：CMF(21) 算法（复用 `StockRepository.get_range` K线） | 无 | `pytest test_cmf.py` 输入已知K线断言 CMF 值 |
-| **3.2** | `relative_strength.py`：个股 vs 板块 RS | 阶段2板块指数 | `pytest test_relative_strength.py` |
-| **3.3** | `capital_proxy.py`：适配 `capital_flow_context.stock_flow`（只读） | 无 | 主力净流入提取 + 归一化 |
-| **3.4** | `pricing_service.py`：三因子组合 + 板块内排名 + point-in-time 快照 | 3.1-3.3,阶段2 | `pytest test_pricing_service.py` 快照落库 |
+| **3.2** | `relative_strength.py`：个股 vs 板块 RS | 阶段1行业指数 K 线 | `pytest test_relative_strength.py` |
+| **3.3** | `capital_proxy.py`：适配 `capital_flow_context.stock_flow`（只读） | 现有 `capital_flow_context` | 主力净流入提取 + 归一化（best-effort） |
+| **3.4** | `pricing_service.py`：三因子组合 + 板块内排名 + point-in-time 快照 | 3.1-3.3, 2.4 | `pytest test_pricing_service.py` 快照落库 |
 | **3.5** | `pricing_repo.py`：PricingSnapshot CRUD + 板块内排名查询 | 3.0 | 查询返回板块内个股排序 |
 | **3.6** | API `plate_pricing.py`：`GET /board/{id}/pricing` | 3.4,3.5 | curl 返回板块内个股比价排名 |
 | **3.7** | 异步任务接入：比价计算并入日终流程（板块内并行） | 3.4 | 日终产出比价快照 |
@@ -776,12 +792,22 @@ capital_proxy.extract(stock_flow)
 
 ---
 
+## 25.1 阶段 3 数据源可达性审计（基于已实现 phase1）
+
+| 任务 | 所需数据源 | 当前状态 | 说明 |
+|---|---|---|---|
+| **3.1** CMF | 个股 21 日 OHLCV | **已具备** | 复用 `StockRepository.get_range` / DSA 日线链路；实测成分股 `002623` 可返回带 `volume` 的日线数据 |
+| **3.2** RS | 个股日 K + 板块基准序列 | **已具备** | 个股日线已具备；板块基准可直接复用 phase1 申万一级行业指数 K 线 |
+| **3.3** Flow | `capital_flow_context.stock_flow` | **部分具备** | 字段契约已存在（`main_net_inflow` / `inflow_5d` / `inflow_10d`），但它是实时/近端快照，非历史序列；当前环境实测为 fail-open `status=failed`，不能作为历史主链路 |
+| **3.4** 比价快照 | 成分股快照 + 3.1/3.2 + （可选）3.3 | **部分具备** | 若 2.4 已从启用日开始落盘，则可做无前视快照；旧历史日仍受 2.4 限制 |
+| **3.6 / 3.7** API / 日终接入 | 3.4 产物 | **部分具备** | 推荐先以 `RS + CMF` 形成主链路，`Flow` 作为 best-effort 增强 |
+
 ## 26. 阶段 3 设计决策
 
 | # | 决策 | 依据 |
 |---|---|---|
 | D3.1 | **CMF 为主资金流因子**（用 K 线 volume，历史可得） | 调研3：CMF 可准实时；ETF 资金流 T+1 滞后 |
-| D3.2 | **`capital_flow_context` 只读适配为辅助因子** | 用户明确"非北向资金替代品"；S14=A 不侵入 |
+| D3.2 | **`capital_flow_context` 只读适配为辅助因子（best-effort）** | 用户明确"非北向资金替代品"；且它是实时快照、非历史序列，不应成为比价历史回算硬依赖 |
 | D3.3 | **比价 = 板块内口径**（首期不做跨板块比价） | 会话 I4 明确"板块内个股比价为首期口径" |
 | D3.4 | **point-in-time 复用阶段2成分股快照** | S2=A；阶段2已建，避免重复 |
 | D3.5 | **不涉北向资金**（X2 排除） | 用户明确"暂不考虑" |
@@ -793,7 +819,7 @@ capital_proxy.extract(stock_flow)
 | # | 问题 | 建议默认 |
 |---|---|---|
 | C3.1 | 比价综合分权重（RS / CMF / Flow）？ | 默认 0.5 / 0.3 / 0.2，配置化可调 |
-| C3.2 | 相对强弱基准：板块指数 vs 板块成分均值？ | 默认板块均值（无需额外取板块指数K线） |
+| C3.2 | 相对强弱基准：板块指数 vs 板块成分均值？ | **基于已实现 phase1，默认先用板块指数**；待 2.4 成分股快照稳定后，再评估切到板块成分均值 |
 | C3.3 | 比价快照保留周期（S9）？ | 默认全保留（磁盘便宜），后续按需冷热分层 |
 
 ---
@@ -815,7 +841,7 @@ capital_proxy.extract(stock_flow)
                                     ▼
 阶段3 (比价系统)                    │ 复用阶段1板块 SPI/指数基础 + 阶段2成分股快照
   ├─ CMF 因子 ◄─ StockRepository.get_range (现有)
-  ├─ 相对强弱 ◄─ 板块均值
+  ├─ 相对强弱 ◄─ 板块指数（默认） / 板块均值（快照稳定后可选）
   ├─ 资金流代理 ◄─ capital_flow_context (只读适配)
   └─ 板块内比价排名 + point-in-time 快照
 ```

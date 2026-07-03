@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] 在 README、full-guide、DEPLOY（中英双语）搜索服务配置表补充 Grok provider 说明。
 - [测试] 为 Grok 搜索 provider 增加解析与重试行为单元测试。
 - [文档] 同步 SPI 规划文档：阶段1权威方案改为 `akshare` 申万一级行业指数直算 SPI，不再将选股宝成分股聚合作为阶段1实施路径。
+- [文档] 补充外部数据源文档中的板块成分股链路，明确区分“个股所属板块”和 AlphaSift 热点详情里的“板块/题材成分股”来源与验证结果。
+- [文档] 审计并更新 SPI 规划文档中 phase2/phase3 的数据源可达性，明确哪些任务可直接复用已实现 phase1，哪些仍受成分股快照或实时资金流能力限制。
 
 ## [3.23.0] - 2026-06-20
 

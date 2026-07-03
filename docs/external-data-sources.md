@@ -127,7 +127,71 @@
 
 返回 DataFrame，包含 `code`（股票代码）和 `name`（股票名称），用于批量名称查询。
 
-#### 12. 资金流向 (`get_fund_flow`)
+#### 12. 个股所属板块 (`get_belong_boards`)
+
+返回 `List[Dict[str, Any]]`，用于补充个股问股、Agent `get_stock_info` 和主分析流程里的 `belong_boards`：
+
+| 字段 | 类型 | 说明 |
+| --- | :---: | --- |
+| `name` | str | 板块名称 |
+| `code` | str | 板块代码（如 `BK0438`） |
+| `type` | str | 板块类型（行业 / 概念 / 地域等，视上游返回而定） |
+
+**当前入口与来源**：
+
+- 统一入口：`DataFetcherManager.get_belong_boards`
+- 当前已验证主源：`EfinanceFetcher.get_belong_board` → `ef.stock.get_belong_board`
+- 主要调用方：
+  - 个股问股 / Agent 工具：`src/agent/tools/data_tools.py` 的 `get_stock_info`
+  - 主分析流程：`src/core/pipeline.py` 将 `belong_boards` 挂到 `fundamental_context`
+
+> 该能力是“**个股 → 所属板块**”，不是“**板块/题材 → 成分股**”。
+
+#### 13. 板块/题材成分股（热点详情 / 轮动候选）
+
+当前仓库里“**板块/题材 → 成分股**”能力不走 `DataFetcherManager`，而是由 AlphaSift 热点详情链路提供，主要用于热点题材详情、后续轮动选股和阶段 2/3 的成分股扩展：
+
+**统一入口**：
+
+- API：`GET /api/v1/alphasift/hotspots/{topic}`
+- 服务：`AlphaSiftService.hotspot_detail`
+- Provider：`DsaEastMoneyHotspotProvider.hotspot_detail`
+
+**返回字段（`stocks` 列表）**：
+
+| 字段 | 类型 | 说明 |
+| --- | :---: | --- |
+| `code` | str | 股票代码 |
+| `name` | str | 股票名称 |
+| `change_pct` | float | 涨跌幅(%)，可为空 |
+| `amount` | float | 成交额，可为空 |
+| `turnover_rate` | float | 换手率(%)，可为空 |
+| `volume_ratio` | float | 量比，可为空 |
+| `role` | str | 角色说明，默认 `概念股` / 兜底时可能为 `活跃股` |
+| `hot_stock_score` | float | 热门度分数 |
+
+**当前源链路**：
+
+| 场景 | 主源 | 回退 / 补强 | 代码入口 |
+| --- | --- | --- | --- |
+| 概念成分股 | `ak.stock_board_concept_cons_em(symbol=topic)` | 同花顺概念页 HTML 解析、板块异动龙头兜底、同热点组活跃股补强 | `DsaEastMoneyHotspotProvider.stock_board_concept_cons_em` |
+| 行业成分股 | `ak.stock_board_industry_cons_em(symbol=topic)` | 板块异动龙头兜底 | `DsaEastMoneyHotspotProvider.stock_board_industry_cons_em` |
+| 行情补强 | DSA `DataFetcherManager.prefetch_realtime_quotes` + `get_realtime_quote` | 为空则保留原始成分股结果 | `DsaEastMoneyHotspotProvider._enrich_constituent_quotes` |
+| 缓存 | provider 进程内缓存 + 题材详情磁盘缓存 | 详情磁盘缓存默认 30 分钟 | `data/alphasift/hotspot_details` |
+
+**验证记录（2026-07-03）**：
+
+- 实网验证：`DataFetcherManager.get_belong_boards("600519")` 返回 29 个所属板块，样例包含 `食品饮料`、`白酒Ⅲ`、`贵州板块`
+- 实网验证：`DsaEastMoneyHotspotProvider.stock_board_concept_cons_em("玻璃基板")` 返回 11 只概念股
+- 实网验证：`DsaEastMoneyHotspotProvider.hotspot_detail("玻璃基板")` 返回 `stock_count=11`，并带有 `change_pct` / `amount` / `turnover_rate` / `volume_ratio` 补强字段
+- 单测验证：`tests/test_alphasift_api.py -k "concept_stocks or uses_industry_constituents_for_industry_hotspots"` 通过
+
+**环境注意事项**：
+
+- 原始东财 / AkShare 成分股接口对代理环境较敏感；若出现 `ProxyError` / `RemoteDisconnected`，优先禁用 `HTTP_PROXY` / `HTTPS_PROXY`
+- 概念股链路比行业链路多一层同花顺页面兜底，因此在上游波动时通常更稳
+
+#### 14. 资金流向 (`get_fund_flow`)
 
 返回个股资金流向数据（主力/散户/超大单/大单/中单/小单净流入）。
 

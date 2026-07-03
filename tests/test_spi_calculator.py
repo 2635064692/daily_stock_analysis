@@ -1,7 +1,14 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.services.spi.spi_calculator import PERIODS, cal_index_spi, cal_stock_spi, ema_for_spi
+from src.services.spi.spi_calculator import (
+    PERIODS,
+    cal_index_spi,
+    cal_stock_spi,
+    cal_stock_spi_v2,
+    ema_for_spi,
+    ema_for_spi_v2,
+)
 
 np.random.seed(42)
 
@@ -154,3 +161,56 @@ class TestCalIndexSpi:
 
     def test_returns_neg1_on_empty_series(self):
         assert cal_index_spi([]) == -1
+
+
+# ── ema_for_spi_v2 ──────────────────────────────────────
+class TestEmaForSpiV2:
+
+    def test_returns_dict_of_lists(self):
+        s = _make_linear_series(250)
+        result = ema_for_spi_v2(s)
+        for v in result.values():
+            assert isinstance(v, list)
+
+    def test_list_length(self):
+        s = _make_linear_series(250)
+        result = ema_for_spi_v2(s)
+        for period, lst in result.items():
+            assert len(lst) == 250 - period
+
+    def test_insufficient_period_excluded(self):
+        result = ema_for_spi_v2(list(range(10)))
+        assert 5 in result
+        assert len(result[5]) == 5
+        for p in [13, 21, 34, 55, 89, 144, 233]:
+            assert p not in result
+
+    def test_empty_series_returns_empty(self):
+        assert ema_for_spi_v2([]) == {}
+
+    def test_values_are_floats(self):
+        s = _make_linear_series(250)
+        result = ema_for_spi_v2(s)
+        for lst in result.values():
+            for v in lst:
+                assert isinstance(v, float)
+
+    def test_last_value_matches_ema_for_spi(self):
+        s = _make_linear_series(250)
+        scalar_map = ema_for_spi(s)
+        series_map = ema_for_spi_v2(s)
+        for period in scalar_map:
+            assert abs(series_map[period][-1] - scalar_map[period]) < 1e-9
+
+
+# ── cal_stock_spi_v2 ─────────────────────────────────────
+class TestCalStockSpiV2:
+
+    def test_score_in_range(self):
+        s = _make_linear_series(250)
+        score = cal_stock_spi_v2(s)
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 100.0
+
+    def test_empty_series_returns_zero(self):
+        assert cal_stock_spi_v2([]) == 0.0
