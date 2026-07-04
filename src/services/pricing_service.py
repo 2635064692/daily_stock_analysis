@@ -10,6 +10,7 @@ from src.repositories.pricing_repo import PricingRepository
 from src.services.pricing.cmf import calc_cmf, normalize_cmf
 from src.services.pricing.capital_proxy import extract_flow, normalize_flow_scores
 from src.services.pricing.relative_strength import calc_period_return, calc_rs_scores_nullable
+from src.services.spi.spi_time import spi_time
 from src.utils.constituents_snapshot import ConstituentFetcher, ConstituentSnapshotRepo
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class PricingService:
         if codes:
             return codes, "snapshot"
 
-        if trade_date < date.today():
+        if trade_date != spi_time():
             return [], "missing"
 
         fetched = self._fetcher.fetch(board_id)
@@ -189,7 +190,7 @@ class PricingService:
         else:
             batch_status = "partial"
 
-        run_id = self._repo.insert_factor_run(
+        run_id = self._repo.save_pricing_batch(
             board_id=board_id,
             trade_date=trade_date,
             constituent_source=constituent_source,
@@ -203,21 +204,8 @@ class PricingService:
             degraded_count=degraded_count,
             status=batch_status,
             error="all_constituents_missing_core_factor" if priced_count == 0 else None,
+            snapshots=stock_results,
         )
-
-        for r in stock_results:
-            self._repo.upsert_pricing(
-                board_id=board_id,
-                stock_code=r["stock_code"],
-                trade_date=trade_date,
-                rs_score=r["rs_score"],
-                cmf=r["cmf"],
-                flow_score=r["flow_score"],
-                total=r["total"],
-                status=r["status"],
-                factor_mask=r["factor_mask"],
-                run_id=run_id,
-            )
 
         return {
             "board_id": board_id,

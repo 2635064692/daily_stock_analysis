@@ -37,6 +37,13 @@ def _make_bars(close: float = 10.0, n: int = 25) -> list:
     return [_bar(close + 1, close - 1, close, 100.0) for _ in range(n)]
 
 
+def _make_repo(run_id: int = 1) -> MagicMock:
+    repo = MagicMock()
+    repo.insert_factor_run.return_value = run_id
+    repo.save_pricing_batch.return_value = run_id
+    return repo
+
+
 def _make_service(
     repo=None,
     constituent_repo=None,
@@ -65,8 +72,7 @@ def _mock_capital_flow(value: float | None):
 
 class TestNoConstituents:
     def test_historical_date_missing_returns_failed(self):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 99
+        repo = _make_repo(run_id=99)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
@@ -87,8 +93,8 @@ class TestNoConstituents:
         assert call_kw["constituent_source"] == "missing"
 
     def test_today_fetcher_returns_empty_also_failed(self):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
+        trade_date = date(2024, 6, 3)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
@@ -98,8 +104,11 @@ class TestNoConstituents:
 
         svc = _make_service(repo=repo, constituent_repo=c_repo, fetcher=fetcher)
 
-        with patch("src.services.pricing_service.time.sleep"):
-            result = svc.price_board(board_id=801010, trade_date=date.today())
+        with (
+            patch("src.services.pricing_service.spi_time", return_value=trade_date),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            result = svc.price_board(board_id=801010, trade_date=trade_date)
 
         assert result["status"] == "failed"
 
@@ -108,8 +117,7 @@ class TestNoConstituents:
 
 class TestConstituentSource:
     def _run(self, trade_date: date, snapshot_codes: list, fetched_codes: list):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = snapshot_codes
@@ -144,8 +152,8 @@ class TestConstituentSource:
         assert result["constituent_count"] == 2
 
     def test_today_no_snapshot_fetches_and_saves(self):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        trade_date = date(2024, 6, 3)
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
@@ -164,15 +172,16 @@ class TestConstituentSource:
         with (
             patch("src.services.pricing_service._fetch_bars", return_value=bars),
             patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.spi_time", return_value=trade_date),
             patch("src.services.pricing_service.time.sleep"),
         ):
-            result = svc.price_board(board_id=801010, trade_date=date.today())
+            result = svc.price_board(board_id=801010, trade_date=trade_date)
 
         fetcher.fetch.assert_called_once_with(801010)
         c_repo.save_constituents.assert_called_once()
         assert result["constituent_count"] == 3
 
-        run_kw = repo.insert_factor_run.call_args.kwargs
+        run_kw = repo.save_pricing_batch.call_args.kwargs
         assert run_kw["constituent_source"] == "current"
 
 
@@ -184,8 +193,7 @@ class TestFlowCoverage:
         codes = [f"00000{i}" for i in range(len(flow_values))]
         trade_date = trade_date or date(2024, 6, 3)
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 42
+        repo = _make_repo(run_id=42)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -214,7 +222,7 @@ class TestFlowCoverage:
         ):
             result = svc.price_board(board_id=801010, trade_date=trade_date)
 
-        run_kw = repo.insert_factor_run.call_args.kwargs
+        run_kw = repo.save_pricing_batch.call_args.kwargs
         return result, run_kw
 
     def test_flow_enabled_when_coverage_at_threshold(self):
@@ -265,8 +273,7 @@ class TestMissingCoreFactor:
     def test_cmf_none_gives_missing_core_factor_status(self):
         codes = ["000001", "000002"]
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 7
+        repo = _make_repo(run_id=7)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -307,8 +314,7 @@ class TestMissingCoreFactor:
         """RS=None (insufficient closes) → missing_core_factor, total=None."""
         codes = ["000001"]
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -339,8 +345,7 @@ class TestMissingCoreFactor:
 
 class TestBatchStatus:
     def _run(self, codes: list, bars_per_code: dict, flow_map: dict, trade_date=date(2024, 6, 3)):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -393,8 +398,7 @@ class TestBatchStatus:
         assert len(degraded_stocks) == 1
 
     def test_no_constituents_batch_status_failed(self):
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
@@ -412,8 +416,7 @@ class TestBatchStatus:
         codes = ["000001", "000002"]
         zero_bars = [_bar(10, 8, 9, 0)] * 2  # Σvol=0 → CMF=None; len<21 → RS=None
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 8
+        repo = _make_repo(run_id=8)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -438,7 +441,7 @@ class TestBatchStatus:
             assert s["status"] == "missing_core_factor"
             assert s["total"] is None
 
-        run_kw = repo.insert_factor_run.call_args.kwargs
+        run_kw = repo.save_pricing_batch.call_args.kwargs
         assert run_kw["status"] == "failed"
         assert run_kw["error"] == "all_constituents_missing_core_factor"
 
@@ -449,8 +452,7 @@ class TestSerialExecution:
     def test_sleep_called_once_per_constituent(self):
         codes = ["000001", "000002", "000003"]
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 1
+        repo = _make_repo(run_id=1)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -476,11 +478,10 @@ class TestSerialExecution:
 # ── test: repo persistence calls ─────────────────────────────────────────────
 
 class TestRepoPersistence:
-    def test_upsert_called_for_each_constituent(self):
+    def test_batch_save_called_once_with_all_snapshots(self):
         codes = ["000001", "000002"]
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 5
+        repo = _make_repo(run_id=5)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -499,15 +500,16 @@ class TestRepoPersistence:
         ):
             result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-        assert repo.upsert_pricing.call_count == len(codes)
-        repo.insert_factor_run.assert_called_once()
+        repo.save_pricing_batch.assert_called_once()
+        call_kw = repo.save_pricing_batch.call_args.kwargs
+        assert len(call_kw["snapshots"]) == len(codes)
+        assert {snapshot["stock_code"] for snapshot in call_kw["snapshots"]} == set(codes)
         assert result["run_id"] == 5
 
-    def test_upsert_carries_run_id(self):
+    def test_batch_save_receives_effective_weights(self):
         codes = ["000001"]
 
-        repo = MagicMock()
-        repo.insert_factor_run.return_value = 77
+        repo = _make_repo(run_id=77)
 
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
@@ -526,5 +528,5 @@ class TestRepoPersistence:
         ):
             svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-        call_kw = repo.upsert_pricing.call_args.kwargs
-        assert call_kw["run_id"] == 77
+        call_kw = repo.save_pricing_batch.call_args.kwargs
+        assert call_kw["effective_weights"] == {"rs": _BASE_W_RS, "cmf": _BASE_W_CMF, "flow": _BASE_W_FLOW}

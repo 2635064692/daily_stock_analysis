@@ -1,8 +1,8 @@
 # SPI 阶段3 比价系统 P0 — Implementation Tasks
 
 > Change ID: spi-rotation-phase3
-> currentPhase: 3-planning
-> 策略: full-collaborate。plan.md 已就绪，待用户审批 + 选执行模式。
+> currentPhase: 6-validation
+> 策略: full-collaborate。实现已完成，P1/P2 review blockers 已修复并完成定向验证。
 >
 > **并行语义说明**：同一 Parallel ID（pN）的 task 跨 Phase 块可并行执行。
 > 每个因子模块与其单测共享 Parallel ID（如 cmf.py 与 test_cmf.py 同为 p2），

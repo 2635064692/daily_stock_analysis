@@ -1,0 +1,13 @@
+{
+  "id": "spi-rotation-phase3-correction-plan",
+  "title": "SPI 阶段3 缠论 S/P 比价修正方案",
+  "status": "completed",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "修正方案已按 docs 约定落盘到 docs/product-specs/spi-rotation-phase3-sp-correction-plan.md，并补充 docs/CHANGELOG.md 文档记录。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "spi-rotation-phase3-correction-plan",
+  "createdAt": "2026-07-04T00:00:00+08:00"
+}

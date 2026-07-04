@@ -1,12 +1,12 @@
 {
   "id": "spi-rotation-phase3",
   "title": "SPI 板块轮动系统 阶段3：比价系统 P0 编码（CMF+RS+Flow + pricing_service + API + 日终接入）",
-  "status": "in_progress",
+  "status": "completed",
   "strategy": "full-collaborate",
-  "currentPhase": "3-planning",
-  "taskPhase": "1;2",
-  "nextAction": "plan.md + tasks.md 已就绪（tasks.md 已按 phase 间并行重组：p1=模块+因子单测跨 Phase1+2 并行，Phase3=pricing_service，p2=API+日终接入）。HARD STOP：等待用户审批计划 + 选执行模式（Agent Teams / Codex / Claude）。",
-  "gate": "user_approval_required",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "P1/P2 review blockers resolved：成分股实时抓取改为按 spi_time() 判断当日、批次落库改为单事务提交；targeted py_compile/pytest passed. Optional next step: add TestClient smoke for /api/v1/plate-pricing/board/{id}/pricing.",
+  "gate": "passed",
   "branch": "docs/grok-search-and-alphasift",
   "scope": "spi-rotation-phase3",
   "createdAt": "2026-07-03T12:48:54Z"
