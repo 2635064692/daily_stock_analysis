@@ -413,14 +413,56 @@ class AkshareFundamentalAdapter:
         result["status"] = "partial" if has_content else "not_supported"
         return result
 
-    def get_capital_flow(self, stock_code: str, top_n: int = 5) -> Dict[str, Any]:
-        """
-        Return stock + sector capital flow.
-        """
+    def get_profit_snapshot(self, stock_code: str) -> Dict[str, Any]:
+        """Return a lightweight profit snapshot for pricing use-cases."""
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "financial_report": {},
+            "source_chain": [],
+            "errors": [],
+        }
+
+        fin_df, fin_source, fin_errors = self._call_df_candidates([
+            ("stock_financial_abstract", {"symbol": stock_code}),
+            ("stock_financial_analysis_indicator", {"symbol": stock_code}),
+            ("stock_financial_analysis_indicator", {}),
+            ("stock_yjbb_em", {"symbol": stock_code}),
+            ("stock_yjbb_em", {}),
+        ])
+        result["errors"].extend(fin_errors)
+        if fin_df is None:
+            return result
+
+        row = _extract_latest_row(fin_df, stock_code)
+        if row is None:
+            return result
+
+        report_date = _normalize_report_date(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["report_date"]))
+        revenue = _safe_float(_pick_by_keywords(row, ["营业总收入", "营业收入", "营收"]))
+        net_profit_parent = _safe_float(_pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"]))
+        operating_cash_flow = _safe_float(
+            _pick_by_keywords(row, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])
+        )
+        roe = _safe_float(_pick_by_keywords(row, ["净资产收益率", "ROE", "净资产收益"]))
+
+        payload = {
+            "report_date": report_date,
+            "revenue": revenue,
+            "net_profit_parent": net_profit_parent,
+            "operating_cash_flow": operating_cash_flow,
+            "roe": roe,
+        }
+        if any(value is not None for value in payload.values()):
+            result["financial_report"] = payload
+            result["source_chain"].append(f"profit_snapshot:{fin_source}")
+            result["status"] = "ok"
+        return result
+
+    def get_stock_capital_flow(self, stock_code: str) -> Dict[str, Any]:
+        """Return stock-level capital flow only, without sector ranking calls."""
         result: Dict[str, Any] = {
             "status": "not_supported",
             "stock_flow": {},
-            "sector_rankings": {"top": [], "bottom": []},
             "source_chain": [],
             "errors": [],
         }
@@ -433,39 +475,75 @@ class AkshareFundamentalAdapter:
             ("stock_main_fund_flow", {}),
         ])
         result["errors"].extend(stock_errors)
-        if stock_df is not None:
-            row = _extract_latest_row(stock_df, stock_code)
-            if row is not None:
-                net_inflow = _safe_float(_pick_by_keywords(row, ["主力净流入", "净流入", "净额"]))
-                inflow_5d = _safe_float(_pick_by_keywords(row, ["5日", "五日"]))
-                inflow_10d = _safe_float(_pick_by_keywords(row, ["10日", "十日"]))
-                result["stock_flow"] = {
-                    "main_net_inflow": net_inflow,
-                    "inflow_5d": inflow_5d,
-                    "inflow_10d": inflow_10d,
-                }
-                result["source_chain"].append(f"capital_stock:{stock_source}")
+        if stock_df is None:
+            return result
+
+        row = _extract_latest_row(stock_df, stock_code)
+        if row is None:
+            return result
+
+        net_inflow = _safe_float(_pick_by_keywords(row, ["主力净流入", "净流入", "净额"]))
+        inflow_5d = _safe_float(_pick_by_keywords(row, ["5日", "五日"]))
+        inflow_10d = _safe_float(_pick_by_keywords(row, ["10日", "十日"]))
+        result["stock_flow"] = {
+            "main_net_inflow": net_inflow,
+            "inflow_5d": inflow_5d,
+            "inflow_10d": inflow_10d,
+        }
+        if any(value is not None for value in result["stock_flow"].values()):
+            result["status"] = "ok"
+            result["source_chain"].append(f"capital_stock:{stock_source}")
+        return result
+
+    def get_sector_capital_flow_rankings(self, top_n: int = 5) -> Dict[str, Any]:
+        """Return sector-level capital flow rankings only."""
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": [],
+            "errors": [],
+        }
 
         sector_df, sector_source, sector_errors = self._call_df_candidates([
             ("stock_sector_fund_flow_rank", {}),
             ("stock_sector_fund_flow_summary", {}),
         ])
         result["errors"].extend(sector_errors)
-        if sector_df is not None:
-            name_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("板块", "行业", "名称", "name"))), None)
-            flow_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("净流入", "主力", "flow", "净额"))), None)
-            if name_col and flow_col:
-                work_df = sector_df[[name_col, flow_col]].copy()
-                work_df[flow_col] = pd.to_numeric(work_df[flow_col], errors="coerce")
-                work_df = work_df.dropna(subset=[flow_col])
-                top_df = work_df.nlargest(top_n, flow_col)
-                bottom_df = work_df.nsmallest(top_n, flow_col)
-                result["sector_rankings"] = {
-                    "top": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in top_df.iterrows()],
-                    "bottom": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in bottom_df.iterrows()],
-                }
-                result["source_chain"].append(f"capital_sector:{sector_source}")
+        if sector_df is None:
+            return result
 
+        name_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("板块", "行业", "名称", "name"))), None)
+        flow_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("净流入", "主力", "flow", "净额"))), None)
+        if not name_col or not flow_col:
+            return result
+
+        work_df = sector_df[[name_col, flow_col]].copy()
+        work_df[flow_col] = pd.to_numeric(work_df[flow_col], errors="coerce")
+        work_df = work_df.dropna(subset=[flow_col])
+        top_df = work_df.nlargest(top_n, flow_col)
+        bottom_df = work_df.nsmallest(top_n, flow_col)
+        result["sector_rankings"] = {
+            "top": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in top_df.iterrows()],
+            "bottom": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in bottom_df.iterrows()],
+        }
+        if result["sector_rankings"]["top"] or result["sector_rankings"]["bottom"]:
+            result["status"] = "ok"
+            result["source_chain"].append(f"capital_sector:{sector_source}")
+        return result
+
+    def get_capital_flow(self, stock_code: str, top_n: int = 5) -> Dict[str, Any]:
+        """
+        Return stock + sector capital flow.
+        """
+        stock_result = self.get_stock_capital_flow(stock_code)
+        sector_result = self.get_sector_capital_flow_rankings(top_n=top_n)
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "stock_flow": stock_result.get("stock_flow", {}),
+            "sector_rankings": sector_result.get("sector_rankings", {"top": [], "bottom": []}),
+            "source_chain": list(stock_result.get("source_chain", [])) + list(sector_result.get("source_chain", [])),
+            "errors": list(stock_result.get("errors", [])) + list(sector_result.get("errors", [])),
+        }
         has_content = bool(result["stock_flow"] or result["sector_rankings"]["top"] or result["sector_rankings"]["bottom"])
         result["status"] = "partial" if has_content else "not_supported"
         return result

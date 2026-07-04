@@ -218,6 +218,63 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(top[0]["name"], "地产")
         self.assertEqual(bottom[0]["name"], "煤炭")
 
+    def test_get_profit_snapshot_returns_financial_report_block(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+        payload = {
+            "status": "ok",
+            "financial_report": {
+                "report_date": "2026-03-31",
+                "net_profit_parent": 123.0,
+            },
+            "source_chain": ["profit_snapshot:stock_financial_abstract"],
+            "errors": [],
+        }
+        with (
+            patch("src.config.get_config", return_value=cfg),
+            patch(
+                "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_profit_snapshot",
+                return_value=payload,
+            ),
+        ):
+            ctx = manager.get_profit_snapshot("600519", budget_seconds=0.5)
+
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual((ctx.get("data") or {}).get("financial_report", {}).get("net_profit_parent"), 123.0)
+
+    def test_get_stock_capital_flow_context_returns_stock_flow_only(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+        payload = {
+            "status": "ok",
+            "stock_flow": {
+                "main_net_inflow": 50.0,
+                "inflow_5d": 100.0,
+                "inflow_10d": 150.0,
+            },
+            "source_chain": ["capital_stock:stock_individual_fund_flow"],
+            "errors": [],
+        }
+        with (
+            patch("src.config.get_config", return_value=cfg),
+            patch(
+                "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_stock_capital_flow",
+                return_value=payload,
+            ),
+        ):
+            ctx = manager.get_stock_capital_flow_context("600519", budget_seconds=0.5)
+
+        self.assertEqual(ctx["status"], "ok")
+        data = ctx.get("data") or {}
+        self.assertEqual((data.get("stock_flow") or {}).get("main_net_inflow"), 50.0)
+        self.assertNotIn("sector_rankings", data)
+
     def test_fundamental_context_aggregates_blocks(self) -> None:
         manager = DataFetcherManager(fetchers=[])
         cfg = SimpleNamespace(

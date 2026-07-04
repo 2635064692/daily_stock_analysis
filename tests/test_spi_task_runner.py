@@ -122,121 +122,26 @@ def test_backfill_history_cleans_up_metadata_when_submit_fails():
     task_repo.delete_backfill_task_run.assert_called_once()
 
 
-def test_refresh_daily_v2_exception_does_not_affect_v1():
+def test_refresh_daily_uses_data_hydrator_for_effective_trade_date():
     queue = ImmediateQueue()
     service = MagicMock()
-    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
-    service.refresh_all_v2.side_effect = RuntimeError("v2 exploded")
-    runner = SpiTaskRunner(queue=queue, service=service, task_repo=MagicMock())
+    hydrator = MagicMock()
+    hydrator.hydrate_trade_date.return_value = {"trade_date": "2026-07-03"}
+    factory = MagicMock(return_value=hydrator)
+    task_repo = MagicMock()
+    runner = SpiTaskRunner(
+        queue=queue,
+        service=service,
+        task_repo=task_repo,
+        data_hydrator_factory=factory,
+    )
 
     with patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)):
         task_id = runner.refresh_daily()
 
     assert task_id is not None
-    service.refresh_all.assert_called_once_with(anchor_date=date(2026, 7, 3))
-
-
-def test_refresh_daily_rotation_skipped_when_no_constituents():
-    queue = ImmediateQueue()
-    service = MagicMock()
-    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
-    service.refresh_all_v2.return_value = {"success": 31, "total": 31}
-
-    rotation_mock = MagicMock()
-
-    runner = SpiTaskRunner(queue=queue, service=service, task_repo=MagicMock())
-
-    with (
-        patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)),
-        patch("src.services.spi.rotation_service.RotationService", return_value=rotation_mock),
-    ):
-        task_id = runner.refresh_daily()
-
-    assert task_id is not None
-    rotation_mock.generate_signals.assert_called_once_with(date(2026, 7, 3))
-
-
-def test_refresh_daily_rotation_exception_does_not_affect_v1():
-    queue = ImmediateQueue()
-    service = MagicMock()
-    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
-    service.refresh_all_v2.return_value = {"success": 31, "total": 31}
-
-    rotation_mock = MagicMock()
-    rotation_mock.generate_signals.side_effect = RuntimeError("rotation exploded")
-
-    runner = SpiTaskRunner(queue=queue, service=service, task_repo=MagicMock())
-
-    with (
-        patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)),
-        patch("src.services.spi.rotation_service.RotationService", return_value=rotation_mock),
-    ):
-        task_id = runner.refresh_daily()
-
-    assert task_id is not None
-    service.refresh_all.assert_called_once_with(anchor_date=date(2026, 7, 3))
-
-
-def test_refresh_daily_runs_pricing_for_top_boards():
-    queue = ImmediateQueue()
-    service = MagicMock()
-    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
-    service.refresh_all_v2.return_value = {"success": 31, "total": 31}
-    task_repo = MagicMock()
-    task_repo.find_top_boards_v2.return_value = [
-        {"board_id": 801010},
-        {"board_id": 801020},
-    ]
-    rotation_mock = MagicMock()
-    pricing_mock = MagicMock()
-    pricing_mock.price_board.side_effect = [
-        {"status": "ok", "priced_count": 3, "degraded_count": 1},
-        {"status": "partial", "priced_count": 2, "degraded_count": 0},
-    ]
-    runner = SpiTaskRunner(queue=queue, service=service, task_repo=task_repo)
-
-    with (
-        patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)),
-        patch("src.services.spi.rotation_service.RotationService", return_value=rotation_mock),
-        patch("src.services.pricing_service.PricingService", return_value=pricing_mock),
-    ):
-        task_id = runner.refresh_daily()
-
-    assert task_id is not None
-    task_repo.find_top_boards_v2.assert_called_once_with(anchor_date=date(2026, 7, 3), top_n=30)
-    assert pricing_mock.price_board.call_args_list == [
-        call(801010, date(2026, 7, 3)),
-        call(801020, date(2026, 7, 3)),
-    ]
-
-
-def test_refresh_daily_pricing_board_exception_does_not_block_following_boards():
-    queue = ImmediateQueue()
-    service = MagicMock()
-    service.refresh_all.return_value = {"anchor_date": "2026-07-03", "total": 31, "success": 31}
-    service.refresh_all_v2.return_value = {"success": 31, "total": 31}
-    task_repo = MagicMock()
-    task_repo.find_top_boards_v2.return_value = [
-        {"board_id": 801010},
-        {"board_id": 801020},
-    ]
-    rotation_mock = MagicMock()
-    pricing_mock = MagicMock()
-    pricing_mock.price_board.side_effect = [
-        RuntimeError("first board failed"),
-        {"status": "ok", "priced_count": 2, "degraded_count": 0},
-    ]
-    runner = SpiTaskRunner(queue=queue, service=service, task_repo=task_repo)
-
-    with (
-        patch("src.services.spi.spi_task_runner.spi_time", return_value=date(2026, 7, 3)),
-        patch("src.services.spi.rotation_service.RotationService", return_value=rotation_mock),
-        patch("src.services.pricing_service.PricingService", return_value=pricing_mock),
-    ):
-        task_id = runner.refresh_daily()
-
-    assert task_id is not None
-    assert pricing_mock.price_board.call_args_list == [
-        call(801010, date(2026, 7, 3)),
-        call(801020, date(2026, 7, 3)),
-    ]
+    factory.assert_called_once_with(
+        plate_service=service,
+        plate_repo=task_repo,
+    )
+    hydrator.hydrate_trade_date.assert_called_once_with(date(2026, 7, 3))

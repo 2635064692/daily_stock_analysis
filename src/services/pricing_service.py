@@ -13,7 +13,11 @@ from src.services.pricing.capital_proxy import extract_flow, normalize_flow_scor
 from src.services.pricing.relative_strength import calc_period_return, calc_rs_scores_nullable
 from src.services.pricing.sp_ratio import calc_sp_ratio, is_eligible_for_sp, sp_ratio_to_score
 from src.services.spi.spi_time import spi_time
-from src.utils.constituents_snapshot import ConstituentFetcher, ConstituentSnapshotRepo
+from src.utils.constituents_snapshot import (
+    ConstituentFetcher,
+    ConstituentRuntimeResolver,
+    ConstituentSnapshotRepo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +55,22 @@ def _extract_total_mv(quote_payload: Any) -> Optional[float]:
 def _extract_profit_context(fctx: Any) -> tuple[Optional[float], Optional[str]]:
     if not isinstance(fctx, dict):
         return None, None
-    earnings = fctx.get("earnings") or {}
-    if not isinstance(earnings, dict):
-        return None, None
-    nested_report = ((earnings.get("data") or {}).get("financial_report") or {})
-    if not isinstance(nested_report, dict):
-        nested_report = {}
-    direct_report = earnings.get("financial_report") or {}
-    if not isinstance(direct_report, dict):
-        direct_report = {}
-    financial_report = nested_report or direct_report
+    data_payload = fctx.get("data") or {}
+    if not isinstance(data_payload, dict):
+        data_payload = {}
+    if isinstance(data_payload.get("financial_report"), dict):
+        financial_report = data_payload.get("financial_report") or {}
+    else:
+        earnings = fctx.get("earnings") or {}
+        if not isinstance(earnings, dict):
+            return None, None
+        nested_report = ((earnings.get("data") or {}).get("financial_report") or {})
+        if not isinstance(nested_report, dict):
+            nested_report = {}
+        direct_report = earnings.get("financial_report") or {}
+        if not isinstance(direct_report, dict):
+            direct_report = {}
+        financial_report = nested_report or direct_report
     profit = financial_report.get("net_profit_parent")
     report_date = financial_report.get("report_date")
     try:
@@ -68,6 +78,18 @@ def _extract_profit_context(fctx: Any) -> tuple[Optional[float], Optional[str]]:
     except (TypeError, ValueError):
         profit_value = None
     return profit_value, report_date
+
+
+def _extract_stock_flow_context(ctx: Any) -> Optional[float]:
+    if not isinstance(ctx, dict):
+        return None
+    data = ctx.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+    stock_flow = data.get("stock_flow") or {}
+    if not isinstance(stock_flow, dict):
+        return None
+    return extract_flow(stock_flow)
 
 
 def _log_profit_report_dates(
@@ -112,6 +134,24 @@ class PricingService:
         Historical dates without a snapshot return ([], 'missing') to protect
         point-in-time semantics — no fallback to latest.
         """
+        if isinstance(self._constituent_repo, ConstituentSnapshotRepo) and isinstance(self._fetcher, ConstituentFetcher):
+            resolver = ConstituentRuntimeResolver(
+                repo=self._constituent_repo,
+                fetcher=self._fetcher,
+                current_trade_date_provider=spi_time,
+            )
+            codes, source, snapshot = resolver.resolve(board_id, trade_date)
+            if snapshot is not None and snapshot.is_stale:
+                logger.info(
+                    "pricing using stale constituent snapshot board_id=%s trade_date=%s "
+                    "origin_trade_date=%s snapshot_age_days=%s",
+                    board_id,
+                    trade_date,
+                    snapshot.origin_trade_date,
+                    snapshot.snapshot_age_days,
+                )
+            return codes, source
+
         codes = self._constituent_repo.get_constituents(board_id, trade_date)
         if codes:
             return codes, "snapshot"
@@ -125,6 +165,62 @@ class PricingService:
 
         self._constituent_repo.save_constituents(board_id, trade_date, fetched)
         return fetched, "current"
+
+    def _collect_stock_inputs(
+        self,
+        *,
+        manager,
+        codes: List[str],
+        trade_date: date,
+    ) -> tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[str]]]:
+        raw_rs: List[Optional[float]] = []
+        raw_cmf: List[Optional[float]] = []
+        raw_flow: List[Optional[float]] = []
+        raw_mktcap: List[Optional[float]] = []
+        raw_profit: List[Optional[float]] = []
+        raw_profit_report_date: List[Optional[str]] = []
+
+        for code in codes:
+            bars = _fetch_bars(code, trade_date, _CMF_WINDOW)
+            closes = [bar.close for bar in bars if bar.close is not None]
+
+            raw_rs.append(calc_period_return(closes, period=_RS_WINDOW))
+            raw_cmf.append(calc_cmf(bars, period=_CMF_WINDOW))
+            raw_mktcap.append(self._load_market_cap(manager, code))
+            profit, report_date = self._load_profit_snapshot(manager, code)
+            raw_profit.append(profit)
+            raw_profit_report_date.append(report_date)
+            raw_flow.append(self._load_stock_capital_flow(manager, code))
+            time.sleep(0.5)
+
+        return raw_rs, raw_cmf, raw_flow, raw_mktcap, raw_profit, raw_profit_report_date
+
+    @staticmethod
+    def _load_market_cap(manager, code: str) -> Optional[float]:
+        try:
+            quote_payload = manager.get_realtime_quote(code)
+            return _extract_total_mv(quote_payload)
+        except Exception:
+            logger.debug("realtime quote fetch failed code=%s", code, exc_info=True)
+            return None
+
+    @staticmethod
+    def _load_profit_snapshot(manager, code: str) -> tuple[Optional[float], Optional[str]]:
+        try:
+            profit_ctx = manager.get_profit_snapshot(code)
+            return _extract_profit_context(profit_ctx)
+        except Exception:
+            logger.debug("profit snapshot fetch failed code=%s", code, exc_info=True)
+            return None, None
+
+    @staticmethod
+    def _load_stock_capital_flow(manager, code: str) -> Optional[float]:
+        try:
+            flow_ctx = manager.get_stock_capital_flow_context(code)
+            return _extract_stock_flow_context(flow_ctx)
+        except Exception:
+            logger.debug("stock capital flow fetch failed code=%s", code, exc_info=True)
+            return None
 
     def price_board(self, board_id: int, trade_date: date) -> Dict[str, Any]:
         """Compute intra-board pricing scores for all constituents on trade_date.
@@ -158,46 +254,14 @@ class PricingService:
             }
 
         manager = _get_fetcher_manager()
-        raw_rs: List[Optional[float]] = []
-        raw_cmf: List[Optional[float]] = []
-        raw_flow: List[Optional[float]] = []
-        raw_mktcap: List[Optional[float]] = []
-        raw_profit: List[Optional[float]] = []
-        raw_profit_report_date: List[Optional[str]] = []
-
-        for code in codes:
-            bars = _fetch_bars(code, trade_date, _CMF_WINDOW)
-            closes = [b.close for b in bars if b.close is not None]
-
-            raw_rs.append(calc_period_return(closes, period=_RS_WINDOW))
-            raw_cmf.append(calc_cmf(bars, period=_CMF_WINDOW))
-
-            try:
-                quote_payload = manager.get_realtime_quote(code)
-                raw_mktcap.append(_extract_total_mv(quote_payload))
-            except Exception:
-                logger.debug("realtime quote fetch failed code=%s", code, exc_info=True)
-                raw_mktcap.append(None)
-
-            try:
-                fctx = manager.get_fundamental_context(code)
-                profit, report_date = _extract_profit_context(fctx)
-                raw_profit.append(profit)
-                raw_profit_report_date.append(report_date)
-            except Exception:
-                logger.debug("fundamental context fetch failed code=%s", code, exc_info=True)
-                raw_profit.append(None)
-                raw_profit_report_date.append(None)
-
-            try:
-                ctx = manager.get_capital_flow_context(code)
-                stock_flow = (ctx.get("data") or {}).get("stock_flow") or {}
-                raw_flow.append(extract_flow(stock_flow))
-            except Exception:
-                logger.debug("capital flow fetch failed code=%s", code, exc_info=True)
-                raw_flow.append(None)
-
-            time.sleep(0.5)
+        (
+            raw_rs,
+            raw_cmf,
+            raw_flow,
+            raw_mktcap,
+            raw_profit,
+            raw_profit_report_date,
+        ) = self._collect_stock_inputs(manager=manager, codes=codes, trade_date=trade_date)
 
         rs_scores = calc_rs_scores_nullable(raw_rs)
         flow_scores = normalize_flow_scores(raw_flow)

@@ -12,7 +12,12 @@ import pandas as pd
 import yaml
 
 from src.repositories.plate_spi_repo import PlateSpiRepository
-from src.utils.constituents_snapshot import ConstituentFetcher, ConstituentSnapshotRepo
+from src.services.spi.spi_time import spi_time
+from src.utils.constituents_snapshot import (
+    ConstituentFetcher,
+    ConstituentRuntimeResolver,
+    ConstituentSnapshotRepo,
+)
 
 logger = logging.getLogger(__name__)
 _ROTATION_CONFIG_PATH = Path(__file__).resolve().parents[3] / "strategies" / "rotation_entry.yaml"
@@ -287,6 +292,24 @@ class RotationService:
         return triggered
 
     def _get_snapshot_constituents(self, board_id: int, trade_date: date) -> List[str]:
+        if isinstance(self._constituent_repo, ConstituentSnapshotRepo) and isinstance(self._fetcher, ConstituentFetcher):
+            resolver = ConstituentRuntimeResolver(
+                repo=self._constituent_repo,
+                fetcher=self._fetcher,
+                current_trade_date_provider=spi_time,
+            )
+            codes, _source, snapshot = resolver.resolve(board_id, trade_date)
+            if snapshot is not None and snapshot.is_stale:
+                logger.info(
+                    "rotation using stale constituent snapshot board_id=%s trade_date=%s "
+                    "origin_trade_date=%s snapshot_age_days=%s",
+                    board_id,
+                    trade_date,
+                    snapshot.origin_trade_date,
+                    snapshot.snapshot_age_days,
+                )
+            return codes
+
         existing_codes = self._constituent_repo.get_constituents(board_id, trade_date)
         if existing_codes:
             return existing_codes

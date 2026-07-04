@@ -1,0 +1,13 @@
+{
+  "id": "constituent-stale-cache",
+  "title": "实现成分股快照陈旧复用与重拉节流",
+  "status": "completed",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "陈旧快照复用、30 秒重拉节流、SQLite 列迁移与回归测试已完成；如需观察真实环境收益，可在已有快照前提下再次执行 hydration。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "constituent-stale-cache",
+  "createdAt": "2026-07-04T14:10:00+08:00"
+}

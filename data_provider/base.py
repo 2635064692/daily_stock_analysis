@@ -3295,6 +3295,118 @@ class DataFetcherManager:
             list(payload.get("errors", [])) + ([err] if err else []),
         )
 
+    def get_stock_capital_flow_context(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Stock-only capital flow block for high-volume pricing paths."""
+        from src.config import get_config
+
+        config = get_config()
+        stock_code = normalize_stock_code(stock_code)
+        timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
+        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["not supported"],
+            )
+        if timeout <= 0:
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
+                ["fundamental stage timeout"],
+            )
+
+        payload, err, cost_ms = self._run_with_retry(
+            lambda: self._fundamental_adapter.get_stock_capital_flow(stock_code),
+            timeout,
+            "capital_flow_stock_only",
+        )
+        if not isinstance(payload, dict):
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": cost_ms}],
+                [err or "capital_flow_stock_only failed"],
+            )
+
+        stock_flow = payload.get("stock_flow") or {}
+        has_stock_flow = isinstance(stock_flow, dict) and any(v is not None for v in stock_flow.values())
+        status = "ok" if has_stock_flow else str(payload.get("status", "not_supported"))
+        if status == "partial" and not has_stock_flow:
+            status = "failed"
+        return self._build_fundamental_block(
+            status,
+            {"stock_flow": stock_flow},
+            self._normalize_source_chain(
+                payload.get("source_chain", []),
+                "capital_flow_stock_only",
+                status,
+                cost_ms,
+            ),
+            list(payload.get("errors", [])) + ([err] if err else []),
+        )
+
+    def get_profit_snapshot(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Lightweight profit snapshot block for pricing paths."""
+        from src.config import get_config
+
+        config = get_config()
+        stock_code = normalize_stock_code(stock_code)
+        timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
+        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["not supported"],
+            )
+        if timeout <= 0:
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
+                ["fundamental stage timeout"],
+            )
+
+        payload, err, cost_ms = self._run_with_retry(
+            lambda: self._fundamental_adapter.get_profit_snapshot(stock_code),
+            timeout,
+            "profit_snapshot",
+        )
+        if not isinstance(payload, dict):
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": cost_ms}],
+                [err or "profit_snapshot failed"],
+            )
+
+        financial_report = payload.get("financial_report") or {}
+        has_content = isinstance(financial_report, dict) and any(value is not None for value in financial_report.values())
+        status = "ok" if has_content else str(payload.get("status", "not_supported"))
+        if status == "partial" and not has_content:
+            status = "failed"
+        return self._build_fundamental_block(
+            status,
+            {"financial_report": financial_report},
+            self._normalize_source_chain(
+                payload.get("source_chain", []),
+                "profit_snapshot",
+                status,
+                cost_ms,
+            ),
+            list(payload.get("errors", [])) + ([err] if err else []),
+        )
+
     def get_dragon_tiger_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
         """龙虎榜块（fail-open）。"""
         from src.config import get_config

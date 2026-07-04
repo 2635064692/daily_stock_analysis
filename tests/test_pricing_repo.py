@@ -212,6 +212,50 @@ def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
     assert len(snapshots) == 1
 
 
+def test_count_snapshots_filters_by_trade_date_and_board(isolated_db):
+    repo = PricingRepository(db_manager=isolated_db)
+    trade_date = date(2024, 6, 3)
+
+    repo.save_pricing_batch(
+        board_id=801010,
+        trade_date=trade_date,
+        constituent_source="snapshot",
+        rs_window=20,
+        cmf_window=20,
+        base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+        effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
+        flow_coverage=0.4,
+        constituent_count=2,
+        priced_count=2,
+        degraded_count=0,
+        status="ok",
+        error=None,
+        snapshots=[
+            _snapshot("000001", total=0.55, rs_score=0.6, cmf=0.2),
+            _snapshot("000002", total=0.88, rs_score=0.9, cmf=0.4),
+        ],
+    )
+    repo.save_pricing_batch(
+        board_id=801020,
+        trade_date=trade_date,
+        constituent_source="snapshot",
+        rs_window=20,
+        cmf_window=20,
+        base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+        effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
+        flow_coverage=0.4,
+        constituent_count=1,
+        priced_count=1,
+        degraded_count=0,
+        status="ok",
+        error=None,
+        snapshots=[_snapshot("000003", total=0.72, rs_score=0.7, cmf=0.3)],
+    )
+
+    assert repo.count_snapshots(trade_date=trade_date) == 3
+    assert repo.count_snapshots(trade_date=trade_date, board_id=801010) == 2
+
+
 def test_database_manager_backfills_pricing_snapshot_sp_columns(tmp_path):
     db_path = tmp_path / "legacy_pricing_snapshot.sqlite"
     with sqlite3.connect(db_path) as connection:

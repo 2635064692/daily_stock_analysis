@@ -1,0 +1,13 @@
+{
+  "id": "price-board-boardscope-refactor",
+  "title": "按个股/板块边界重构 price_board 外部调用",
+  "status": "completed",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "已完成按个股/板块边界重构与定向回归；若后续还需继续压测，可在真实 hydration 场景下统计外部调用次数与耗时变化。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "price-board-boardscope-refactor",
+  "createdAt": "2026-07-04T15:35:00+08:00"
+}

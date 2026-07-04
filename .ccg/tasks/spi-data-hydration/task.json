@@ -1,0 +1,13 @@
+{
+  "id": "spi-data-hydration",
+  "title": "构建 SPI 数据补齐入口以解除 AlphaSift 联调阻塞",
+  "status": "completed",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "代码与测试已完成；按需在目标环境执行 `scripts/hydrate_spi_data.py` 生成当日 SPI v1/v2、rotation、pricing 数据并检查 readiness。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "spi-data-hydration",
+  "createdAt": "2026-07-04T11:20:00+08:00"
+}

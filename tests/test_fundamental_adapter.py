@@ -128,6 +128,43 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(dividend_payload.get("ttm_event_count"), 1)
         self.assertAlmostEqual(dividend_payload.get("ttm_cash_dividend_per_share"), 0.3, places=6)
 
+    def test_profit_snapshot_returns_financial_report_only(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        fin_df = pd.DataFrame(
+            {
+                "股票代码": ["600519"],
+                "报告期": ["2026-03-31"],
+                "营业总收入": [1000.0],
+                "归母净利润": [300.0],
+                "经营活动产生的现金流量净额": [500.0],
+                "净资产收益率": [18.2],
+            }
+        )
+        with patch.object(adapter, "_call_df_candidates", return_value=(fin_df, "stock_financial_abstract", [])):
+            result = adapter.get_profit_snapshot("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["financial_report"]["net_profit_parent"], 300.0)
+        self.assertEqual(result["financial_report"]["report_date"], "2026-03-31")
+        self.assertEqual(result["source_chain"], ["profit_snapshot:stock_financial_abstract"])
+
+    def test_stock_capital_flow_omits_sector_rankings_query(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        stock_df = pd.DataFrame(
+            {
+                "股票代码": ["600519"],
+                "主力净流入": [123.0],
+                "5日净流入": [200.0],
+                "10日净流入": [300.0],
+            }
+        )
+        with patch.object(adapter, "_call_df_candidates", return_value=(stock_df, "stock_individual_fund_flow", [])) as call_mock:
+            result = adapter.get_stock_capital_flow("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["stock_flow"]["main_net_inflow"], 123.0)
+        self.assertEqual(call_mock.call_count, 1)
+
     def test_build_dividend_payload_returns_empty_when_code_not_matched(self) -> None:
         now = datetime.now().strftime("%Y-%m-%d")
         df = pd.DataFrame(

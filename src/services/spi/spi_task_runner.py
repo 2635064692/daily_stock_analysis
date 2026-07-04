@@ -8,6 +8,7 @@ import uuid
 from datetime import date
 
 from src.repositories.plate_spi_repo import PlateSpiRepository
+from src.services.spi.data_hydrator import SpiDataHydrator
 from src.services.task_queue import AnalysisTaskQueue
 from src.services.spi.plate_spi_service import PlateSpiService
 from src.services.spi.spi_time import iter_trading_dates, spi_time
@@ -20,67 +21,17 @@ SPI_TASK_STOCK_CODE = "SPI_PLATE_ROTATION"
 class SpiTaskRunner:
     _submit_lock = threading.Lock()
 
-    def __init__(self, queue=None, service=None, task_repo=None):
+    def __init__(self, queue=None, service=None, task_repo=None, data_hydrator_factory=None):
         self.queue = queue or AnalysisTaskQueue()
         self.service = service or PlateSpiService()
         self.task_repo = task_repo or PlateSpiRepository()
+        self._data_hydrator_factory = data_hydrator_factory
 
     def refresh_daily(self) -> str:
         def _run():
             anchor_date = spi_time()
-            self.service.refresh_all(anchor_date=anchor_date)
-
-            try:
-                self.service.refresh_all_v2(anchor_date=anchor_date)
-            except Exception as exc:
-                logger.warning("v2 refresh failed, skipping: %s", exc)
-
-            try:
-                from src.services.spi.rotation_service import RotationService
-                rotation = RotationService()
-                rotation.generate_signals(anchor_date)
-            except Exception as exc:
-                logger.warning("rotation signal generation failed, skipping: %s", exc)
-
-            try:
-                from src.services.pricing_service import PricingService
-                pricing = PricingService()
-                top_boards = self.task_repo.find_top_boards_v2(
-                    anchor_date=anchor_date, top_n=30
-                )
-                logger.info(
-                    "pricing: starting board pricing for %d boards date=%s",
-                    len(top_boards),
-                    anchor_date,
-                )
-                priced_total = 0
-                degraded_total = 0
-                for board in top_boards:
-                    board_id = board["board_id"]
-                    try:
-                        result = pricing.price_board(board_id, anchor_date)
-                        priced_total += result.get("priced_count", 0)
-                        degraded_total += result.get("degraded_count", 0)
-                        logger.debug(
-                            "pricing board=%s status=%s priced=%s degraded=%s",
-                            board_id,
-                            result.get("status"),
-                            result.get("priced_count"),
-                            result.get("degraded_count"),
-                        )
-                    except Exception as board_exc:
-                        logger.warning(
-                            "pricing board=%s failed, skipping: %s", board_id, board_exc
-                        )
-                logger.info(
-                    "pricing: completed date=%s boards=%d priced=%d degraded=%d",
-                    anchor_date,
-                    len(top_boards),
-                    priced_total,
-                    degraded_total,
-                )
-            except Exception as exc:
-                logger.warning("pricing refresh failed, skipping: %s", exc)
+            hydrator = self._build_data_hydrator()
+            return hydrator.hydrate_trade_date(anchor_date)
 
         return self._submit_spi_task(
             run_task=_run,
@@ -184,3 +135,14 @@ class SpiTaskRunner:
             if task.stock_code == SPI_TASK_STOCK_CODE:
                 return task.task_id
         return None
+
+    def _build_data_hydrator(self) -> SpiDataHydrator:
+        if self._data_hydrator_factory is not None:
+            return self._data_hydrator_factory(
+                plate_service=self.service,
+                plate_repo=self.task_repo,
+            )
+        return SpiDataHydrator(
+            plate_service=self.service,
+            plate_repo=self.task_repo,
+        )

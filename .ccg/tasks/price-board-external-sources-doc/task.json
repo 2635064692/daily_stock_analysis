@@ -1,0 +1,13 @@
+{
+  "id": "price-board-external-sources-doc",
+  "title": "梳理并文档化 price_board 外部数据源",
+  "status": "completed",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "已完成 `price_board` 外部依赖链路文档化；后续如数据源优先级调整，应同步更新 `docs/external-data-sources.md` 的板块比价小节。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "price-board-external-sources-doc",
+  "createdAt": "2026-07-04T15:05:00+08:00"
+}

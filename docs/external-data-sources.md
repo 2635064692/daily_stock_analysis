@@ -191,7 +191,54 @@
 - 原始东财 / AkShare 成分股接口对代理环境较敏感；若出现 `ProxyError` / `RemoteDisconnected`，优先禁用 `HTTP_PROXY` / `HTTPS_PROXY`
 - 概念股链路比行业链路多一层同花顺页面兜底，因此在上游波动时通常更稳
 
-#### 14. 资金流向 (`get_fund_flow`)
+#### 14. 板块比价 (`PricingService.price_board`)
+
+`PricingService.price_board(board_id, trade_date)` 会为**单个板块的全部成分股**生成 `pricing_snapshot` / `pricing_factor_run`，供 SPI `sector_rotation` 和 AlphaSift `PricingFilter` 使用。
+
+**调用链入口**：
+
+- 服务入口：`src/services/pricing_service.py` 的 `PricingService.price_board`
+- 日终/补齐入口：
+  - `SpiTaskRunner.refresh_daily`
+  - `SpiDataHydrator._refresh_pricing_stage`
+
+**依赖的数据来源分层**：
+
+| 层级 | 读取内容 | 代码入口 | 外部源 / 存储 | 说明 |
+| --- | --- | --- | --- | --- |
+| 1 | 板块成分股列表 | `ConstituentSnapshotRepo.get_snapshot_state` / `ConstituentRuntimeResolver.resolve` | 本地 `constituent_snapshot`；缺失时回源 `legulegu` | 当前交易日优先读库；无快照时可沿用最近 22 个交易日内快照；再缺失才请求 `https://legulegu.com/stockdata/index-composition?industryCode={board_id}.SI` |
+| 2 | 个股历史日线 | `StockRepository.get_range`（经 `_fetch_bars`） | 本地 `stock_daily` | `price_board` **不直接联网抓 K 线**，只读库中已落地日线；若库里没数据，CMF/RS 会退化 |
+| 3 | 实时总市值 | `DataFetcherManager.get_realtime_quote` | 行情数据源优先级链 | 用于读取 `total_mv`；A 股默认链见“实时行情优先级” |
+| 4 | 基本面利润字段 | `DataFetcherManager.get_profit_snapshot` | 轻量基本面读取链 | 仅读取 `financial_report.net_profit_parent` / `report_date`，避免逐股走完整 `get_fundamental_context` 聚合 |
+| 5 | 资金流代理 | `DataFetcherManager.get_stock_capital_flow_context` | 个股级资金流读取链 | 仅读取 `stock_flow.main_net_inflow` 等个股字段；不再为每只股票重复拉取板块级 `sector_rankings` |
+
+**因子与数据映射**：
+
+| 输出字段 | 依赖输入 |
+| --- | --- |
+| `rs_score` | 本地日线收益序列 |
+| `cmf` | 本地日线 OHLCV |
+| `sp_ratio` / `sp_score` | `total_mv` + `net_profit_parent` |
+| `flow_score` | `stock_capital_flow_context.stock_flow` |
+| `total` | `sp_score + cmf + flow_score` 的板块内加权结果 |
+
+**执行特征**：
+
+- 当前实现是**单板块内串行**处理全部成分股，不做股票级并发
+- 每只股票处理完成后固定 `sleep(0.5s)`，主要为了压低资金流/行情链路的节奏
+- 因此外部源压力主要来自：
+  - `legulegu` 成分股页面
+  - `get_realtime_quote`
+  - `get_profit_snapshot`
+  - `get_stock_capital_flow_context`
+
+**排障重点**：
+
+- 如果 `pricing_snapshot` 为空，先看 `constituent_snapshot` 是否已有成分股
+- 若成分股已存在但 `priced_count=0`，再看 `stock_daily` 是否缺日线、`total_mv` / `net_profit_parent` 是否缺失
+- 若运行极慢，优先从 `pricing_top_n`、陈旧快照复用、而不是并发度入手
+
+#### 15. 资金流向 (`get_fund_flow`)
 
 返回个股资金流向数据（主力/散户/超大单/大单/中单/小单净流入）。
 

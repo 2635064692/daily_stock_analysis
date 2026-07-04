@@ -859,6 +859,11 @@ _PRICING_SNAPSHOT_COLUMN_SQL: Dict[str, str] = {
     "sp_ratio": "FLOAT",
     "sp_score": "FLOAT",
 }
+_CONSTITUENT_SNAPSHOT_COLUMN_SQL: Dict[str, str] = {
+    "origin_trade_date": "DATE",
+    "is_stale": "BOOLEAN DEFAULT 0",
+    "snapshot_age_days": "INTEGER DEFAULT 0",
+}
 _LLM_USAGE_INTEGER_TELEMETRY_COLUMNS = {
     column
     for column, column_type in _LLM_USAGE_TELEMETRY_COLUMN_SQL.items()
@@ -1137,6 +1142,9 @@ class ConstituentSnapshot(Base):
     board_id = Column(Integer, nullable=False, index=True)
     trade_date = Column(Date, nullable=False, index=True)
     stock_codes_json = Column(Text, nullable=False)
+    origin_trade_date = Column(Date, nullable=True, index=True)
+    is_stale = Column(Boolean, nullable=False, default=False, index=True)
+    snapshot_age_days = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
@@ -1150,7 +1158,7 @@ class PricingFactorRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     board_id = Column(Integer, nullable=False, index=True)
     trade_date = Column(Date, nullable=False, index=True)
-    constituent_source = Column(String(16), nullable=False)  # 'snapshot' | 'current'
+    constituent_source = Column(String(24), nullable=False)  # 'snapshot' | 'current' | 'stale_snapshot' | 'missing'
     rs_window = Column(Integer, nullable=False)
     cmf_window = Column(Integer, nullable=False)
     base_weights_json = Column(Text, nullable=False)
@@ -1269,6 +1277,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_spi_v2_columns()
             self._ensure_pricing_snapshot_columns()
+            self._ensure_constituent_snapshot_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1537,6 +1546,68 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                             time.sleep(delay)
                         continue
                     raise
+
+    def _ensure_constituent_snapshot_columns(self) -> None:
+        """Add stale-snapshot metadata columns to existing SQLite DBs."""
+        if not self._is_sqlite_engine:
+            return
+        try:
+            existing = {
+                column["name"]
+                for column in inspect(self._engine).get_columns(ConstituentSnapshot.__tablename__)
+            }
+        except Exception as exc:
+            logger.warning("[Constituent snapshot] failed to inspect columns: %s", exc)
+            return
+
+        max_retries = self._sqlite_write_retry_max
+        for column, column_type in _CONSTITUENT_SNAPSHOT_COLUMN_SQL.items():
+            if column in existing:
+                continue
+            for attempt in range(max_retries + 1):
+                try:
+                    with self._engine.begin() as connection:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {ConstituentSnapshot.__tablename__} "
+                            f"ADD COLUMN {column} {column_type}"
+                        )
+                    existing.add(column)
+                    break
+                except OperationalError as exc:
+                    if self._is_sqlite_duplicate_column_error(exc, column):
+                        existing.add(column)
+                        break
+                    if self._is_sqlite_locked_error(exc) and attempt < max_retries:
+                        delay = self._sqlite_write_retry_base_delay * (2 ** attempt)
+                        logger.warning(
+                            "[Constituent snapshot] SQLite column backfill locked, retrying: "
+                            "%s (%s/%s, %.2fs)",
+                            column,
+                            attempt + 1,
+                            max_retries,
+                            delay,
+                        )
+                        if delay > 0:
+                            time.sleep(delay)
+                        continue
+                    raise
+
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE {ConstituentSnapshot.__tablename__} "
+                f"SET origin_trade_date = trade_date "
+                f"WHERE origin_trade_date IS NULL"
+            )
+            connection.exec_driver_sql(
+                f"UPDATE {ConstituentSnapshot.__tablename__} "
+                f"SET is_stale = 0 "
+                f"WHERE is_stale IS NULL"
+            )
+            connection.exec_driver_sql(
+                f"UPDATE {ConstituentSnapshot.__tablename__} "
+                f"SET snapshot_age_days = 0 "
+                f"WHERE snapshot_age_days IS NULL"
+            )
 
     def _ensure_intelligence_item_scope_values(self) -> None:
         """Backfill nullable intelligence item scopes so SQLite unique keys work."""

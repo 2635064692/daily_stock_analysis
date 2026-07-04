@@ -3,7 +3,7 @@ import json
 from datetime import date
 from typing import Any, Dict, List, Optional, Sequence
 
-from sqlalchemy import and_, select, desc, nulls_last
+from sqlalchemy import and_, select, desc, nulls_last, func
 
 from src.storage import DatabaseManager, PricingFactorRun, PricingSnapshot
 
@@ -174,6 +174,18 @@ class PricingRepository:
                 .limit(1)
             ).scalar_one_or_none()
             return row
+
+    def count_snapshots(self, *, trade_date: date, board_id: Optional[int] = None) -> int:
+        conditions = [PricingSnapshot.trade_date == trade_date]
+        if board_id is not None:
+            conditions.append(PricingSnapshot.board_id == board_id)
+        with self.db.get_session() as session:
+            count = session.execute(
+                select(func.count())
+                .select_from(PricingSnapshot)
+                .where(and_(*conditions))
+            ).scalar_one()
+            return int(count or 0)
 
     def _upsert_pricing_in_session(
         self,

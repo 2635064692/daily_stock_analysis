@@ -91,10 +91,14 @@ def _manager_for_codes(
         return _quote(total_mvs.get(code, 1_000.0))
 
     def _fundamental_side_effect(code: str):
-        return _fundamental(
-            profits.get(code, 100.0),
-            report_dates.get(code, "2026-03-31"),
-        )
+        return {
+            "data": {
+                "financial_report": {
+                    "net_profit_parent": profits.get(code, 100.0),
+                    "report_date": report_dates.get(code, "2026-03-31"),
+                }
+            }
+        }
 
     def _flow_side_effect(code: str):
         value = flow_values.get(code, 100.0)
@@ -103,8 +107,10 @@ def _manager_for_codes(
         return {"data": {"stock_flow": {"main_net_inflow": value}}}
 
     mgr.get_realtime_quote.side_effect = _quote_side_effect
-    mgr.get_fundamental_context.side_effect = _fundamental_side_effect
-    mgr.get_capital_flow_context.side_effect = _flow_side_effect
+    mgr.get_profit_snapshot.side_effect = _fundamental_side_effect
+    mgr.get_stock_capital_flow_context.side_effect = _flow_side_effect
+    mgr.get_fundamental_context = MagicMock(side_effect=AssertionError("price_board should not call get_fundamental_context"))
+    mgr.get_capital_flow_context = MagicMock(side_effect=AssertionError("price_board should not call get_capital_flow_context"))
     return mgr
 
 
@@ -369,3 +375,23 @@ class TestOperationalDetails:
             assert "sp_ratio" in snapshot
             assert "sp_score" in snapshot
             assert snapshot["factor_mask"] in {"sp,cmf,flow", "sp,cmf"}
+
+    def test_price_board_uses_stock_only_fetch_paths(self):
+        codes = ["000001", "000002"]
+        repo = _make_repo(run_id=6)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(codes)
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        assert mgr.get_profit_snapshot.call_count == len(codes)
+        assert mgr.get_stock_capital_flow_context.call_count == len(codes)
+        mgr.get_fundamental_context.assert_not_called()
+        mgr.get_capital_flow_context.assert_not_called()

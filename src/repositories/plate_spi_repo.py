@@ -3,7 +3,7 @@ import logging
 from datetime import date
 from typing import Dict, List, Optional
 
-from sqlalchemy import and_, select, desc
+from sqlalchemy import and_, select, desc, func
 
 from sqlalchemy.exc import IntegrityError
 
@@ -178,6 +178,18 @@ class PlateSpiRepository:
                 for r in rows
             ]
 
+    def count_snapshots(self, *, trade_date: date, require_v2: bool = False) -> int:
+        conditions = [PlateSpiSnapshot.trade_date == trade_date]
+        if require_v2:
+            conditions.append(PlateSpiSnapshot.v2_score.isnot(None))
+        with self.db.get_session() as session:
+            count = session.execute(
+                select(func.count())
+                .select_from(PlateSpiSnapshot)
+                .where(and_(*conditions))
+            ).scalar_one()
+            return int(count or 0)
+
     def upsert_rotation_signal(
         self, *, board_id: int, stock_code: str, trade_date: date,
         action: str, reason: str = "",
@@ -215,6 +227,26 @@ class PlateSpiRepository:
                 }
                 for r in rows
             ]
+
+    def count_rotation_signals(
+        self,
+        *,
+        trade_date: date,
+        action: Optional[str] = None,
+        board_id: Optional[int] = None,
+    ) -> int:
+        conditions = [SpiRotationSignal.trade_date == trade_date]
+        if action:
+            conditions.append(SpiRotationSignal.action == action)
+        if board_id is not None:
+            conditions.append(SpiRotationSignal.board_id == board_id)
+        with self.db.get_session() as session:
+            count = session.execute(
+                select(func.count())
+                .select_from(SpiRotationSignal)
+                .where(and_(*conditions))
+            ).scalar_one()
+            return int(count or 0)
 
     def find_active_rotation_positions(self, *, before_date: date) -> Dict[int, List[str]]:
         with self.db.get_session() as session:
