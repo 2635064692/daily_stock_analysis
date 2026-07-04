@@ -1065,8 +1065,17 @@ class AlphaSiftService:
         _write_alphasift_hotspot_detail_cache(provider=provider_name, topic=topic_text, payload=cleaned)
         return cleaned
 
-    def screen(self, *, strategy: str, market: str, max_results: int) -> Dict[str, Any]:
+    def screen(self, *, strategy: str, market: str, max_results: int, enable_pricing_filter: Optional[bool] = None) -> Dict[str, Any]:
         _ensure_alphasift_enabled(self.config)
+        pricing_filter_enabled = bool(enable_pricing_filter)
+
+        if strategy == "sector_rotation":
+            return self._screen_sector_rotation(
+                market=market,
+                max_results=max_results,
+                enable_pricing_filter=pricing_filter_enabled,
+            )
+
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
         _ensure_supported_strategy(strategy)
@@ -1099,6 +1108,12 @@ class AlphaSiftService:
         raw_data = _remove_non_finite_json_values(raw_data)
 
         candidates = _normalize_candidates(raw_data)
+        if pricing_filter_enabled and candidates:
+            from src.services.spi.pricing_filter import PricingFilter
+            from src.services.spi.spi_time import spi_time
+
+            pricing_filter = PricingFilter()
+            candidates = pricing_filter.apply(candidates, trade_date=spi_time())
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
         return {
@@ -1110,7 +1125,8 @@ class AlphaSiftService:
             "market": raw_data.get("market") or market,
             "snapshot_count": raw_data.get("snapshot_count"),
             "snapshot_source": raw_data.get("snapshot_source") or "",
-            "after_filter_count": raw_data.get("after_filter_count"),
+            "after_filter_count": len(candidates) if pricing_filter_enabled else raw_data.get("after_filter_count"),
+            "pricing_filter_enabled": pricing_filter_enabled,
             "llm_ranked": raw_data.get("llm_ranked"),
             "llm_market_view": raw_data.get("llm_market_view") or "",
             "llm_selection_logic": raw_data.get("llm_selection_logic") or "",
@@ -1127,6 +1143,63 @@ class AlphaSiftService:
             "risk_enabled": raw_data.get("risk_enabled"),
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
+        }
+
+    def _screen_sector_rotation(self, *, market: str, max_results: int, enable_pricing_filter: bool) -> Dict[str, Any]:
+        from src.services.spi.rotation_screening import SectorRotationScreener
+        from src.services.spi.spi_time import spi_time
+
+        if market != "cn":
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "alphasift_invalid_input", "message": "sector_rotation 仅支持 cn 市场"},
+            )
+
+        trade_date = spi_time()
+        screener = SectorRotationScreener()
+        try:
+            result = screener.screen(trade_date=trade_date, max_results=max_results)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=424,
+                detail={"error": "sector_rotation_screen_failed", "message": f"Sector rotation 选股失败：{exc}"},
+            ) from exc
+
+        candidates = result.get("candidates", [])
+        if enable_pricing_filter and candidates:
+            from src.services.spi.pricing_filter import PricingFilter
+            pf = PricingFilter()
+            candidates = pf.apply(candidates, trade_date=trade_date)
+
+        candidates, dsa_enrichment = _enrich_candidates_with_dsa(candidates)
+        return {
+            "enabled": True,
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "run_id": None,
+            "strategy": "sector_rotation",
+            "market": market,
+            "snapshot_count": None,
+            "snapshot_source": result.get("snapshot_source", ""),
+            "after_filter_count": len(candidates) if enable_pricing_filter else None,
+            "pricing_filter_enabled": enable_pricing_filter,
+            "llm_ranked": None,
+            "llm_market_view": "",
+            "llm_selection_logic": "",
+            "llm_portfolio_risk": "",
+            "llm_coverage": None,
+            "llm_parse_errors": [],
+            "warnings": result.get("warnings", []),
+            "source_errors": [],
+            "dsa_enrichment": dsa_enrichment,
+            "deep_analysis_requested": None,
+            "post_analyzers": [],
+            "daily_enriched": None,
+            "daily_enrich_count": None,
+            "risk_enabled": None,
+            "portfolio_diversity_enabled": None,
+            "portfolio_concentration_notes": [],
+            "rotation_boards": result.get("rotation_boards", 0),
         }
 
 
@@ -1666,7 +1739,7 @@ def _list_strategies() -> List[Dict[str, Any]]:
         if not strategy.get("id"):
             continue
         normalized.append(strategy)
-    return normalized
+    return _merge_builtin_alphasift_strategies(normalized)
 
 
 def _normalize_strategy(raw: Any) -> Dict[str, Any]:
@@ -1710,6 +1783,32 @@ def _strategy_model(**kwargs: Any) -> Dict[str, Any]:
         return normalized.model_dump()
     except AttributeError:
         return normalized.dict()
+
+
+def _builtin_alphasift_strategies() -> List[Dict[str, Any]]:
+    return [
+        _strategy_model(
+            id="sector_rotation",
+            name="板块轮动",
+            title="板块轮动",
+            description="复用 SPI v2 评分、轮动 BUY 信号与板块内比价快照进行选股。",
+            category="SPI",
+            tag="rotation",
+            tags=["spi", "rotation", "pricing"],
+            market_scope=["cn"],
+            market="cn",
+        )
+    ]
+
+
+def _merge_builtin_alphasift_strategies(strategies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged = list(strategies)
+    existing_ids = {item.get("id") for item in merged if item.get("id")}
+    for strategy in _builtin_alphasift_strategies():
+        strategy_id = strategy.get("id")
+        if strategy_id and strategy_id not in existing_ids:
+            merged.append(strategy)
+    return merged
 
 
 def _ensure_supported_strategy(strategy: str) -> None:

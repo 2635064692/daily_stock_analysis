@@ -23,6 +23,7 @@ class AlphaSiftScreenRequest(BaseModel):
     market: str = Field("cn", min_length=1, max_length=16)
     strategy: str = Field("dual_low", min_length=1, max_length=64)
     max_results: int = Field(20, ge=1, le=100)
+    enable_pricing_filter: Optional[bool] = Field(None)
 
 
 class AlphaSiftStrategyResponse(BaseModel):
@@ -142,6 +143,7 @@ def alphasift_start_screen_task(
             strategy=request.strategy,
             market=request.market,
             max_results=request.max_results,
+            enable_pricing_filter=request.enable_pricing_filter,
         )
         task_queue.update_task_progress(
             task_id,
@@ -198,4 +200,5 @@ def alphasift_screen(
         strategy=request.strategy,
         market=request.market,
         max_results=request.max_results,
+        enable_pricing_filter=request.enable_pricing_filter,
     )

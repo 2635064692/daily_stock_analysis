@@ -1,0 +1,13 @@
+{
+  "id": "alphasift-sector-rotation-integration",
+  "title": "核实 Claude 进度并接管 AlphaSift 板块轮动集成收口",
+  "status": "in_progress",
+  "strategy": "single-agent",
+  "currentPhase": "6-validation",
+  "taskPhase": "6",
+  "nextAction": "代码与离线测试已收口；待本地/目标环境补齐 SPI v2、BUY 信号与 pricing_snapshot 数据后，继续执行 6.6 候选字段契约验收。",
+  "gate": null,
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "alphasift-sector-rotation-integration",
+  "createdAt": "2026-07-04T10:30:00+08:00"
+}

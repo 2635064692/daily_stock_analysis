@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] AlphaSift 新增 `sector_rotation` 选股策略并支持可选 `enable_pricing_filter` 后处理，复用 SPI v2、轮动 BUY 信号与板块内比价快照。
 - [文档] 新增 SPI phase3 从动量排序切换到缠论 S/P 比价的修正方案文档。
 - [改进] SPI phase3 比价实现改为缠论 S/P 主因子 + CMF/Flow 确认，并在板块比价 API 暴露 `sp_ratio`/`sp_score` 诊断字段。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->

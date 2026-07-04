@@ -268,10 +268,12 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             payload = self._strategies(config=config)
 
         self.assertEqual(payload["enabled"], True)
-        self.assertEqual(payload["strategy_count"], 2)
+        self.assertEqual(payload["strategy_count"], 3)
         self.assertEqual(payload["strategies"][0]["id"], "dual_low")
         self.assertEqual(payload["strategies"][0]["name"], "双低选股")
         self.assertEqual(payload["strategies"][1]["name"], "趋势质量")
+        self.assertEqual(payload["strategies"][2]["id"], "sector_rotation")
+        self.assertEqual(payload["strategies"][2]["market"], "cn")
 
     def test_hotspots_returns_alphasift_hotspot_summaries(self) -> None:
         config = self._config(enabled=True)
@@ -1548,6 +1550,15 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 403)
         self.assertEqual(caught.exception.detail["error"], "alphasift_disabled")
 
+    def test_sector_rotation_screen_rejects_when_disabled(self) -> None:
+        config = self._config(enabled=False)
+
+        with self.assertRaises(HTTPException) as caught:
+            self._screen(config, market="cn", strategy="sector_rotation", max_results=5)
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_disabled")
+
     def test_screen_rejects_when_alphasift_unavailable(self) -> None:
         config = self._config(enabled=True)
 
@@ -1598,12 +1609,44 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload.max_results, 3)
         fake_queue.submit_background_task.assert_called_once()
         self.assertEqual(fake_queue.submit_background_task.call_args.kwargs["report_type"], "alphasift_screen")
-        screen_mock.assert_called_once_with(strategy="dual_low", market="cn", max_results=3)
+        screen_mock.assert_called_once_with(
+            strategy="dual_low",
+            market="cn",
+            max_results=3,
+            enable_pricing_filter=None,
+        )
         self.assertEqual(result["candidate_count"], 0)
         fake_queue.update_task_progress.assert_any_call(
             "screen-task-1",
             20,
             "正在执行 AlphaSift 选股，外部数据源较慢时会持续后台运行",
+        )
+
+    def test_screen_endpoint_forwards_enable_pricing_filter(self) -> None:
+        config = self._config(enabled=True)
+
+        with patch.object(
+            alphasift_endpoint.AlphaSiftService,
+            "screen",
+            return_value={"enabled": True, "candidates": [], "candidate_count": 0},
+        ) as screen_mock:
+            payload = alphasift_endpoint.alphasift_screen(
+                alphasift_endpoint.AlphaSiftScreenRequest(
+                    market="cn",
+                    strategy="dual_low",
+                    max_results=3,
+                    enable_pricing_filter=True,
+                ),
+                http_request=self._request(),
+                config=config,
+            )
+
+        self.assertEqual(payload["candidate_count"], 0)
+        screen_mock.assert_called_once_with(
+            strategy="dual_low",
+            market="cn",
+            max_results=3,
+            enable_pricing_filter=True,
         )
 
     def test_screen_task_status_returns_alphasift_result(self) -> None:
@@ -1862,6 +1905,92 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["risk_level"], "medium")
         self.assertEqual(payload["candidates"][0]["price"], 1688.0)
         self.assertEqual(payload["candidates"][0]["industry"], "Baijiu")
+
+    def test_screen_applies_pricing_filter_when_enabled(self) -> None:
+        config = self._config(enabled=True)
+        trade_date = datetime(2026, 7, 4).date()
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "strategy": "dual_low",
+                    "market": "cn",
+                    "candidates": [
+                        {"code": "600519", "board_id": 801010},
+                        {"code": "000858", "board_id": 801010},
+                    ],
+                }
+            ),
+        )
+        filtered_candidates = [
+            {"code": "600519", "board_id": 801010, "total": 0.88, "pricing_rank": 1},
+        ]
+        pricing_filter = MagicMock()
+        pricing_filter.apply.return_value = filtered_candidates
+        dsa_enrichment = {
+            "enabled": True,
+            "max_candidates": 3,
+            "requested_count": 1,
+            "enriched_count": 0,
+            "warnings": [],
+        }
+
+        with (
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+            patch("src.services.spi.pricing_filter.PricingFilter", return_value=pricing_filter),
+            patch("src.services.spi.spi_time.spi_time", return_value=trade_date),
+            patch(
+                "src.services.alphasift_service._enrich_candidates_with_dsa",
+                return_value=(filtered_candidates, dsa_enrichment),
+            ),
+        ):
+            payload = self._screen(
+                config,
+                mock_enrichment=False,
+                market="cn",
+                strategy="dual_low",
+                max_results=5,
+                enable_pricing_filter=True,
+            )
+
+        called_candidates = pricing_filter.apply.call_args.args[0]
+        self.assertEqual([item["code"] for item in called_candidates], ["600519", "000858"])
+        self.assertEqual(pricing_filter.apply.call_args.kwargs["trade_date"], trade_date)
+        self.assertTrue(payload["pricing_filter_enabled"])
+        self.assertEqual(payload["after_filter_count"], 1)
+        self.assertEqual(payload["candidate_count"], 1)
+
+    def test_screen_skips_pricing_filter_when_disabled(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "strategy": "dual_low",
+                    "market": "cn",
+                    "after_filter_count": 2,
+                    "candidates": [
+                        {"code": "600519", "board_id": 801010},
+                        {"code": "000858", "board_id": 801010},
+                    ],
+                }
+            ),
+        )
+
+        with (
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+            patch("src.services.spi.pricing_filter.PricingFilter") as pricing_filter_cls,
+        ):
+            payload = self._screen(
+                config,
+                market="cn",
+                strategy="dual_low",
+                max_results=5,
+                enable_pricing_filter=False,
+            )
+
+        pricing_filter_cls.assert_not_called()
+        self.assertFalse(payload["pricing_filter_enabled"])
+        self.assertEqual(payload["after_filter_count"], 2)
+        self.assertEqual(payload["candidate_count"], 2)
 
     def test_screen_prefers_dsa_daily_history_for_alphasift_enrichment(self) -> None:
         config = self._config(enabled=True)
