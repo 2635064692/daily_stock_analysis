@@ -20,6 +20,8 @@ class PricingRepository:
         stock_code: str,
         trade_date: date,
         rs_score: Optional[float],
+        sp_ratio: Optional[float],
+        sp_score: Optional[float],
         cmf: Optional[float],
         flow_score: Optional[float],
         total: Optional[float],
@@ -34,6 +36,8 @@ class PricingRepository:
                 stock_code=stock_code,
                 trade_date=trade_date,
                 rs_score=rs_score,
+                sp_ratio=sp_ratio,
+                sp_score=sp_score,
                 cmf=cmf,
                 flow_score=flow_score,
                 total=total,
@@ -126,6 +130,8 @@ class PricingRepository:
                         stock_code=snapshot["stock_code"],
                         trade_date=trade_date,
                         rs_score=snapshot.get("rs_score"),
+                        sp_ratio=snapshot.get("sp_ratio"),
+                        sp_score=snapshot.get("sp_score"),
                         cmf=snapshot.get("cmf"),
                         flow_score=snapshot.get("flow_score"),
                         total=snapshot.get("total"),
@@ -177,6 +183,8 @@ class PricingRepository:
         stock_code: str,
         trade_date: date,
         rs_score: Optional[float],
+        sp_ratio: Optional[float],
+        sp_score: Optional[float],
         cmf: Optional[float],
         flow_score: Optional[float],
         total: Optional[float],
@@ -195,6 +203,8 @@ class PricingRepository:
         ).scalar_one_or_none()
         if existing:
             existing.rs_score = rs_score
+            existing.sp_ratio = sp_ratio
+            existing.sp_score = sp_score
             existing.cmf = cmf
             existing.flow_score = flow_score
             existing.total = total
@@ -208,6 +218,8 @@ class PricingRepository:
             stock_code=stock_code,
             trade_date=trade_date,
             rs_score=rs_score,
+            sp_ratio=sp_ratio,
+            sp_score=sp_score,
             cmf=cmf,
             flow_score=flow_score,
             total=total,

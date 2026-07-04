@@ -854,6 +854,11 @@ _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
     "approx_common_prefix_tokens": "INTEGER",
     "known_dynamic_marker_positions": "TEXT",
 }
+
+_PRICING_SNAPSHOT_COLUMN_SQL: Dict[str, str] = {
+    "sp_ratio": "FLOAT",
+    "sp_score": "FLOAT",
+}
 _LLM_USAGE_INTEGER_TELEMETRY_COLUMNS = {
     column
     for column, column_type in _LLM_USAGE_TELEMETRY_COLUMN_SQL.items()
@@ -1167,11 +1172,13 @@ class PricingSnapshot(Base):
     stock_code = Column(String(16), nullable=False, index=True)
     trade_date = Column(Date, nullable=False, index=True)
     rs_score = Column(Float)
+    sp_ratio = Column(Float)
+    sp_score = Column(Float)
     cmf = Column(Float)           # raw CMF ∈ [-1, 1]
     flow_score = Column(Float)
     total = Column(Float)         # combined score ∈ [0, 1]
     status = Column(String(32), nullable=False, index=True)  # 'ok' | 'degraded' | 'missing_core_factor' | 'missing_constituents'
-    factor_mask = Column(String(16))  # bitmask string, e.g. 'rs,cmf,flow'
+    factor_mask = Column(String(16))  # bitmask string, e.g. 'sp,cmf,flow'
     run_id = Column(Integer, ForeignKey('pricing_factor_run.id'), index=True)
 
     __table_args__ = (
@@ -1261,6 +1268,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_spi_v2_columns()
+            self._ensure_pricing_snapshot_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1484,6 +1492,51 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         except OperationalError as exc:
             if not self._is_sqlite_duplicate_column_error(exc, "v2_score"):
                 raise
+
+    def _ensure_pricing_snapshot_columns(self) -> None:
+        """Add SP pricing columns to existing SQLite DBs."""
+        if not self._is_sqlite_engine:
+            return
+        try:
+            existing = {
+                column["name"]
+                for column in inspect(self._engine).get_columns(PricingSnapshot.__tablename__)
+            }
+        except Exception as exc:
+            logger.warning("[Pricing snapshot] failed to inspect columns: %s", exc)
+            return
+
+        max_retries = self._sqlite_write_retry_max
+        for column, column_type in _PRICING_SNAPSHOT_COLUMN_SQL.items():
+            if column in existing:
+                continue
+            for attempt in range(max_retries + 1):
+                try:
+                    with self._engine.begin() as connection:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {PricingSnapshot.__tablename__} "
+                            f"ADD COLUMN {column} {column_type}"
+                        )
+                    existing.add(column)
+                    break
+                except OperationalError as exc:
+                    if self._is_sqlite_duplicate_column_error(exc, column):
+                        existing.add(column)
+                        break
+                    if self._is_sqlite_locked_error(exc) and attempt < max_retries:
+                        delay = self._sqlite_write_retry_base_delay * (2 ** attempt)
+                        logger.warning(
+                            "[Pricing snapshot] SQLite column backfill locked, retrying: %s "
+                            "(%s/%s, %.2fs)",
+                            column,
+                            attempt + 1,
+                            max_retries,
+                            delay,
+                        )
+                        if delay > 0:
+                            time.sleep(delay)
+                        continue
+                    raise
 
     def _ensure_intelligence_item_scope_values(self) -> None:
         """Backfill nullable intelligence item scopes so SQLite unique keys work."""

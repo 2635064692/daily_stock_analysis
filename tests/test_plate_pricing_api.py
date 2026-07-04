@@ -63,10 +63,12 @@ def test_get_board_pricing_uses_latest_trade_date_by_default():
             stock_code="600519",
             total=0.92,
             rs_score=0.95,
+            sp_ratio=0.72,
+            sp_score=0.5814,
             cmf=0.12,
             flow_score=0.88,
             status="ok",
-            factor_mask="rs,cmf,flow",
+            factor_mask="sp,cmf,flow",
         )
     ]
     module.PricingRepository = MagicMock(return_value=repo)
@@ -82,10 +84,12 @@ def test_get_board_pricing_uses_latest_trade_date_by_default():
                 "stock_code": "600519",
                 "total": 0.92,
                 "rs_score": 0.95,
+                "sp_ratio": 0.72,
+                "sp_score": 0.5814,
                 "cmf": 0.12,
                 "flow_score": 0.88,
                 "status": "ok",
-                "factor_mask": "rs,cmf,flow",
+                "factor_mask": "sp,cmf,flow",
             }
         ],
     }

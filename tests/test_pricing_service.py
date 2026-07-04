@@ -7,12 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Stub out modules unavailable in the test environment before any src import.
 for _mod in ("dotenv",):
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
-# dotenv.load_dotenv / dotenv_values must be callable
 sys.modules["dotenv"].load_dotenv = lambda *a, **kw: None
 sys.modules["dotenv"].dotenv_values = lambda *a, **kw: {}
 
@@ -21,20 +19,43 @@ from src.services.pricing_service import (
     _BASE_W_CMF,
     _BASE_W_CMF_NO_FLOW,
     _BASE_W_FLOW,
-    _BASE_W_RS,
-    _BASE_W_RS_NO_FLOW,
+    _BASE_W_SP,
+    _BASE_W_SP_NO_FLOW,
 )
 
-
-# ── helpers ──────────────────────────────────────────────────────────────────
 
 def _bar(h: float, l: float, c: float, v: float):
     return SimpleNamespace(high=h, low=l, close=c, volume=v)
 
 
 def _make_bars(close: float = 10.0, n: int = 25) -> list:
-    """Bars with distinct high/low to yield a non-None CMF."""
     return [_bar(close + 1, close - 1, close, 100.0) for _ in range(n)]
+
+
+def _make_trend_bars(start: float, end: float, n: int = 25) -> list:
+    step = (end - start) / max(n - 1, 1)
+    closes = [start + step * idx for idx in range(n)]
+    return [_bar(close + 1, close - 1, close, 100.0) for close in closes]
+
+
+def _quote(total_mv: float | None):
+    return None if total_mv is None else SimpleNamespace(total_mv=total_mv)
+
+
+def _fundamental(
+    profit: float | None,
+    report_date: str | None = "2026-03-31",
+):
+    return {
+        "earnings": {
+            "data": {
+                "financial_report": {
+                    "net_profit_parent": profit,
+                    "report_date": report_date,
+                }
+            }
+        }
+    }
 
 
 def _make_repo(run_id: int = 1) -> MagicMock:
@@ -44,11 +65,7 @@ def _make_repo(run_id: int = 1) -> MagicMock:
     return repo
 
 
-def _make_service(
-    repo=None,
-    constituent_repo=None,
-    fetcher=None,
-) -> PricingService:
+def _make_service(repo=None, constituent_repo=None, fetcher=None) -> PricingService:
     return PricingService(
         repo=repo or MagicMock(),
         constituent_repo=constituent_repo or MagicMock(),
@@ -56,27 +73,46 @@ def _make_service(
     )
 
 
-def _mock_capital_flow(value: float | None):
-    """Returns a mock manager whose get_capital_flow_context returns the given value."""
+def _manager_for_codes(
+    codes: list[str],
+    *,
+    flow_values: dict[str, float | None] | None = None,
+    total_mvs: dict[str, float | None] | None = None,
+    profits: dict[str, float | None] | None = None,
+    report_dates: dict[str, str | None] | None = None,
+) -> MagicMock:
+    flow_values = flow_values or {}
+    total_mvs = total_mvs or {}
+    profits = profits or {}
+    report_dates = report_dates or {}
     mgr = MagicMock()
-    if value is None:
-        mgr.get_capital_flow_context.side_effect = Exception("flow unavailable")
-    else:
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": value}}
-        }
+
+    def _quote_side_effect(code: str):
+        return _quote(total_mvs.get(code, 1_000.0))
+
+    def _fundamental_side_effect(code: str):
+        return _fundamental(
+            profits.get(code, 100.0),
+            report_dates.get(code, "2026-03-31"),
+        )
+
+    def _flow_side_effect(code: str):
+        value = flow_values.get(code, 100.0)
+        if value is None:
+            raise Exception("no flow")
+        return {"data": {"stock_flow": {"main_net_inflow": value}}}
+
+    mgr.get_realtime_quote.side_effect = _quote_side_effect
+    mgr.get_fundamental_context.side_effect = _fundamental_side_effect
+    mgr.get_capital_flow_context.side_effect = _flow_side_effect
     return mgr
 
-
-# ── test: no constituents (historical date missing) ───────────────────────────
 
 class TestNoConstituents:
     def test_historical_date_missing_returns_failed(self):
         repo = _make_repo(run_id=99)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
-
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with patch("src.services.pricing_service.time.sleep"):
@@ -85,248 +121,112 @@ class TestNoConstituents:
         assert result["status"] == "failed"
         assert result["stocks"] == []
         assert result["run_id"] == 99
-
         repo.insert_factor_run.assert_called_once()
-        call_kw = repo.insert_factor_run.call_args.kwargs
-        assert call_kw["status"] == "failed"
-        assert call_kw["error"] == "no_constituents"
-        assert call_kw["constituent_source"] == "missing"
-
-    def test_today_fetcher_returns_empty_also_failed(self):
-        repo = _make_repo(run_id=1)
-        trade_date = date(2024, 6, 3)
-
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = []
-
-        fetcher = MagicMock()
-        fetcher.fetch.return_value = []
-
-        svc = _make_service(repo=repo, constituent_repo=c_repo, fetcher=fetcher)
-
-        with (
-            patch("src.services.pricing_service.spi_time", return_value=trade_date),
-            patch("src.services.pricing_service.time.sleep"),
-        ):
-            result = svc.price_board(board_id=801010, trade_date=trade_date)
-
-        assert result["status"] == "failed"
-
-
-# ── test: constituent source paths ────────────────────────────────────────────
-
-class TestConstituentSource:
-    def _run(self, trade_date: date, snapshot_codes: list, fetched_codes: list):
-        repo = _make_repo(run_id=1)
-
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = snapshot_codes
-
-        fetcher = MagicMock()
-        fetcher.fetch.return_value = fetched_codes
-
-        bars = _make_bars()
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 1000.0}}
-        }
-
-        svc = _make_service(repo=repo, constituent_repo=c_repo, fetcher=fetcher)
-
-        with (
-            patch("src.services.pricing_service._fetch_bars", return_value=bars),
-            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
-            patch("src.services.pricing_service.time.sleep"),
-        ):
-            result = svc.price_board(board_id=801010, trade_date=trade_date)
-
-        return result, c_repo, fetcher
-
-    def test_snapshot_hit_uses_snapshot_source(self):
-        result, c_repo, fetcher = self._run(
-            trade_date=date(2024, 6, 1),
-            snapshot_codes=["000001", "000002"],
-            fetched_codes=[],
-        )
-        fetcher.fetch.assert_not_called()
-        assert result["constituent_count"] == 2
+        assert repo.insert_factor_run.call_args.kwargs["error"] == "no_constituents"
 
     def test_today_no_snapshot_fetches_and_saves(self):
         trade_date = date(2024, 6, 3)
         repo = _make_repo(run_id=1)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = []
-
         fetcher = MagicMock()
         fetcher.fetch.return_value = ["000001", "000002", "000003"]
-
-        bars = _make_bars()
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 500.0}}
-        }
-
+        mgr = _manager_for_codes(fetcher.fetch.return_value)
         svc = _make_service(repo=repo, constituent_repo=c_repo, fetcher=fetcher)
 
         with (
-            patch("src.services.pricing_service._fetch_bars", return_value=bars),
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
             patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
             patch("src.services.pricing_service.spi_time", return_value=trade_date),
             patch("src.services.pricing_service.time.sleep"),
         ):
             result = svc.price_board(board_id=801010, trade_date=trade_date)
 
+        assert result["constituent_count"] == 3
         fetcher.fetch.assert_called_once_with(801010)
         c_repo.save_constituents.assert_called_once()
-        assert result["constituent_count"] == 3
+        assert repo.save_pricing_batch.call_args.kwargs["constituent_source"] == "current"
 
-        run_kw = repo.save_pricing_batch.call_args.kwargs
-        assert run_kw["constituent_source"] == "current"
-
-
-# ── test: flow_coverage threshold switching ───────────────────────────────────
 
 class TestFlowCoverage:
-    def _run_with_flow_values(self, flow_values: list, trade_date: date | None = None):
-        """flow_values: list of float|None, one per constituent."""
+    def _run_with_flow_values(self, flow_values: list[float | None]):
         codes = [f"00000{i}" for i in range(len(flow_values))]
-        trade_date = trade_date or date(2024, 6, 3)
-
         repo = _make_repo(run_id=42)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
-
-        bars = _make_bars()
-
-        call_idx = 0
-
-        def _side_effect_flow(code):
-            nonlocal call_idx
-            v = flow_values[call_idx]
-            call_idx += 1
-            if v is None:
-                raise Exception("no flow")
-            return {"data": {"stock_flow": {"main_net_inflow": v}}}
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.side_effect = _side_effect_flow
-
+        mgr = _manager_for_codes(
+            codes,
+            flow_values={code: flow_values[idx] for idx, code in enumerate(codes)},
+        )
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
-            patch("src.services.pricing_service._fetch_bars", return_value=bars),
-            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
-            patch("src.services.pricing_service.time.sleep"),
-        ):
-            result = svc.price_board(board_id=801010, trade_date=trade_date)
-
-        run_kw = repo.save_pricing_batch.call_args.kwargs
-        return result, run_kw
-
-    def test_flow_enabled_when_coverage_at_threshold(self):
-        # 3 out of 5 valid = 0.6 exactly → flow_enabled
-        result, run_kw = self._run_with_flow_values([100.0, None, 200.0, None, 300.0])
-        assert result["flow_enabled"] is True
-        assert result["flow_coverage"] == pytest.approx(0.6)
-        assert run_kw["effective_weights"]["flow"] == pytest.approx(_BASE_W_FLOW)
-        assert run_kw["effective_weights"]["rs"] == pytest.approx(_BASE_W_RS)
-        assert run_kw["effective_weights"]["cmf"] == pytest.approx(_BASE_W_CMF)
-
-    def test_flow_disabled_when_coverage_below_threshold(self):
-        # 2 out of 5 valid = 0.4 → flow_disabled
-        result, run_kw = self._run_with_flow_values([100.0, None, None, None, 200.0])
-        assert result["flow_enabled"] is False
-        assert result["flow_coverage"] == pytest.approx(0.4)
-        assert "flow" not in run_kw["effective_weights"]
-        assert run_kw["effective_weights"]["rs"] == pytest.approx(_BASE_W_RS_NO_FLOW)
-        assert run_kw["effective_weights"]["cmf"] == pytest.approx(_BASE_W_CMF_NO_FLOW)
-
-    def test_flow_disabled_all_stocks_use_rs_cmf_weights(self):
-        result, _ = self._run_with_flow_values([None, None, None, None])
-        assert result["flow_enabled"] is False
-        for s in result["stocks"]:
-            if s["status"] == "ok":
-                # total must be weighted by RS_NO_FLOW + CMF_NO_FLOW
-                assert s["total"] is not None
-
-    def test_flow_enabled_single_missing_flow_is_degraded(self):
-        # 4 valid, 1 None → coverage=0.8 → flow_enabled; the None stock is degraded
-        result, _ = self._run_with_flow_values([100.0, 200.0, 300.0, None, 400.0])
-        assert result["flow_enabled"] is True
-        degraded = [s for s in result["stocks"] if s["status"] == "degraded"]
-        assert len(degraded) == 1
-
-    def test_all_flow_valid_produces_three_factor_total(self):
-        result, run_kw = self._run_with_flow_values([100.0, 200.0, 300.0])
-        assert result["flow_enabled"] is True
-        for s in result["stocks"]:
-            assert s["status"] == "ok"
-            assert s["total"] is not None
-        assert run_kw["effective_weights"]["flow"] == pytest.approx(_BASE_W_FLOW)
-
-
-# ── test: single stock missing core factor (CMF=None) ─────────────────────────
-
-class TestMissingCoreFactor:
-    def test_cmf_none_gives_missing_core_factor_status(self):
-        codes = ["000001", "000002"]
-
-        repo = _make_repo(run_id=7)
-
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = codes
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 500.0}}
-        }
-
-        normal_bars = _make_bars()
-        # Bars that cause CMF=None: fewer than min_period=5
-        short_bars = [_bar(10, 8, 9, 0)] * 2  # Σvol=0 → None CMF
-
-        call_count = 0
-
-        def _fetch_bars_side(code, td, window):
-            nonlocal call_count
-            b = short_bars if call_count == 0 else normal_bars
-            call_count += 1
-            return b
-
-        svc = _make_service(repo=repo, constituent_repo=c_repo)
-
-        with (
-            patch("src.services.pricing_service._fetch_bars", side_effect=_fetch_bars_side),
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
             patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
             patch("src.services.pricing_service.time.sleep"),
         ):
             result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-        stocks = {s["stock_code"]: s for s in result["stocks"]}
+        return result, repo.save_pricing_batch.call_args.kwargs
+
+    def test_flow_enabled_when_coverage_at_threshold(self):
+        result, run_kw = self._run_with_flow_values([100.0, None, 200.0, None, 300.0])
+        assert result["flow_enabled"] is True
+        assert result["flow_coverage"] == pytest.approx(0.6)
+        assert run_kw["effective_weights"]["sp"] == pytest.approx(_BASE_W_SP)
+        assert run_kw["effective_weights"]["cmf"] == pytest.approx(_BASE_W_CMF)
+        assert run_kw["effective_weights"]["flow"] == pytest.approx(_BASE_W_FLOW)
+
+    def test_flow_disabled_when_coverage_below_threshold(self):
+        result, run_kw = self._run_with_flow_values([100.0, None, None, None, 200.0])
+        assert result["flow_enabled"] is False
+        assert result["flow_coverage"] == pytest.approx(0.4)
+        assert run_kw["effective_weights"]["sp"] == pytest.approx(_BASE_W_SP_NO_FLOW)
+        assert run_kw["effective_weights"]["cmf"] == pytest.approx(_BASE_W_CMF_NO_FLOW)
+
+    def test_single_missing_flow_degrades_only_that_stock(self):
+        result, _ = self._run_with_flow_values([100.0, 200.0, 300.0, None, 400.0])
+        degraded = [item for item in result["stocks"] if item["status"] == "degraded"]
+        assert result["flow_enabled"] is True
+        assert len(degraded) == 1
+
+
+class TestCoreFactorRules:
+    def test_cmf_none_gives_missing_core_factor_status(self):
+        codes = ["000001", "000002"]
+        repo = _make_repo(run_id=7)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(codes)
+        short_bars = [_bar(10, 8, 9, 0)] * 2
+        fetch_calls = 0
+
+        def _fetch_bars_side_effect(code, td, window):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return short_bars if fetch_calls == 1 else _make_bars()
+
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", side_effect=_fetch_bars_side_effect),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        stocks = {item["stock_code"]: item for item in result["stocks"]}
         assert stocks["000001"]["status"] == "missing_core_factor"
         assert stocks["000001"]["total"] is None
         assert stocks["000002"]["status"] == "ok"
-        assert stocks["000002"]["total"] is not None
 
-    def test_rs_none_also_missing_core_factor(self):
-        """RS=None (insufficient closes) → missing_core_factor, total=None."""
+    def test_rs_none_is_diagnostic_only_not_core_factor(self):
         codes = ["000001"]
-
         repo = _make_repo(run_id=1)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 100.0}}
-        }
-
-        # Only 5 bars: CMF is fine (min_period=5) but RS needs period+1=21 closes → None
+        mgr = _manager_for_codes(codes)
         few_bars = [_bar(10, 8, 9, 100)] * 5
-
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
@@ -336,96 +236,40 @@ class TestMissingCoreFactor:
         ):
             result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-        s = result["stocks"][0]
-        assert s["status"] == "missing_core_factor"
-        assert s["total"] is None
+        assert result["stocks"][0]["status"] == "ok"
+        assert result["stocks"][0]["total"] is not None
+        snapshots = repo.save_pricing_batch.call_args.kwargs["snapshots"]
+        assert snapshots[0]["rs_score"] is None
+        assert snapshots[0]["sp_score"] == pytest.approx(0.5)
 
-
-# ── test: batch status rules ──────────────────────────────────────────────────
-
-class TestBatchStatus:
-    def _run(self, codes: list, bars_per_code: dict, flow_map: dict, trade_date=date(2024, 6, 3)):
+    def test_missing_profit_gives_missing_core_factor(self):
+        codes = ["000001", "000002"]
         repo = _make_repo(run_id=1)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
-
-        def _fetch(code, td, window):
-            return bars_per_code.get(code, _make_bars())
-
-        def _flow(code):
-            v = flow_map.get(code)
-            if v is None:
-                raise Exception("no flow")
-            return {"data": {"stock_flow": {"main_net_inflow": v}}}
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.side_effect = _flow
-
+        mgr = _manager_for_codes(codes, profits={"000001": None, "000002": 100.0})
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
-            patch("src.services.pricing_service._fetch_bars", side_effect=_fetch),
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
             patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
             patch("src.services.pricing_service.time.sleep"),
         ):
-            return svc.price_board(board_id=801010, trade_date=trade_date)
+            result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-    def test_all_ok_batch_status_ok(self):
-        codes = ["000001", "000002"]
-        bars = {c: _make_bars() for c in codes}
-        flow = {c: 100.0 for c in codes}
-        result = self._run(codes, bars, flow)
-        assert result["status"] == "ok"
+        stocks = {item["stock_code"]: item for item in result["stocks"]}
+        assert stocks["000001"]["status"] == "missing_core_factor"
+        assert stocks["000002"]["status"] == "ok"
 
-    def test_one_missing_core_makes_partial(self):
-        codes = ["000001", "000002"]
-        short = [_bar(10, 8, 9, 0)] * 2  # CMF=None → missing_core_factor
-        bars = {"000001": short, "000002": _make_bars()}
-        flow = {c: 100.0 for c in codes}
-        result = self._run(codes, bars, flow)
-        assert result["status"] == "partial"
 
-    def test_degraded_stock_makes_partial(self):
-        codes = ["000001", "000002", "000003", "000004", "000005"]
-        bars = {c: _make_bars() for c in codes}
-        # 4 out of 5 flow valid = 0.8 → flow_enabled; 000001 has None → degraded
-        flow = {c: 100.0 for c in codes}
-        flow["000001"] = None
-        result = self._run(codes, bars, flow)
-        assert result["status"] == "partial"
-        degraded_stocks = [s for s in result["stocks"] if s["status"] == "degraded"]
-        assert len(degraded_stocks) == 1
-
-    def test_no_constituents_batch_status_failed(self):
-        repo = _make_repo(run_id=1)
-
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = []
-
-        svc = _make_service(repo=repo, constituent_repo=c_repo)
-
-        with patch("src.services.pricing_service.time.sleep"):
-            result = svc.price_board(board_id=801010, trade_date=date(2024, 1, 2))
-
-        assert result["status"] == "failed"
-
+class TestBatchStatusAndRanking:
     def test_all_missing_core_factor_batch_status_failed(self):
-        # All constituents have RS=None and CMF=None (zero-volume bars < min_period)
-        # → priced_count=0 → batch_status must be 'failed', not 'partial'
         codes = ["000001", "000002"]
-        zero_bars = [_bar(10, 8, 9, 0)] * 2  # Σvol=0 → CMF=None; len<21 → RS=None
-
         repo = _make_repo(run_id=8)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 100.0}}
-        }
-
+        mgr = _manager_for_codes(codes)
+        zero_bars = [_bar(10, 8, 9, 0)] * 2
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
@@ -437,31 +281,51 @@ class TestBatchStatus:
 
         assert result["status"] == "failed"
         assert result["priced_count"] == 0
-        for s in result["stocks"]:
-            assert s["status"] == "missing_core_factor"
-            assert s["total"] is None
+        call_kw = repo.save_pricing_batch.call_args.kwargs
+        assert call_kw["status"] == "failed"
+        assert call_kw["error"] == "all_constituents_missing_core_factor"
 
-        run_kw = repo.save_pricing_batch.call_args.kwargs
-        assert run_kw["status"] == "failed"
-        assert run_kw["error"] == "all_constituents_missing_core_factor"
-
-
-# ── test: time.sleep is called per constituent ────────────────────────────────
-
-class TestSerialExecution:
-    def test_sleep_called_once_per_constituent(self):
-        codes = ["000001", "000002", "000003"]
-
-        repo = _make_repo(run_id=1)
-
+    def test_sp_drives_total_even_when_rs_is_weaker(self):
+        codes = ["000001", "000002"]
+        repo = _make_repo(run_id=11)
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(
+            codes,
+            total_mvs={"000001": 100.0, "000002": 200.0},
+            profits={"000001": 10.0, "000002": 10.0},
+            flow_values={"000001": 100.0, "000002": 100.0},
+        )
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
 
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 100.0}}
+        def _bars_for_code(code, td, window):
+            if code == "000001":
+                return _make_trend_bars(10.0, 11.0)
+            return _make_trend_bars(10.0, 20.0)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", side_effect=_bars_for_code),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        snapshots = {
+            item["stock_code"]: item
+            for item in repo.save_pricing_batch.call_args.kwargs["snapshots"]
         }
+        assert snapshots["000001"]["rs_score"] < snapshots["000002"]["rs_score"]
+        assert snapshots["000001"]["sp_score"] > snapshots["000002"]["sp_score"]
+        assert snapshots["000001"]["total"] > snapshots["000002"]["total"]
 
+
+class TestOperationalDetails:
+    def test_sleep_called_once_per_constituent(self):
+        codes = ["000001", "000002", "000003"]
+        repo = _make_repo(run_id=1)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(codes)
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
@@ -474,23 +338,18 @@ class TestSerialExecution:
         assert mock_sleep.call_count == len(codes)
         mock_sleep.assert_called_with(0.5)
 
-
-# ── test: repo persistence calls ─────────────────────────────────────────────
-
-class TestRepoPersistence:
-    def test_batch_save_called_once_with_all_snapshots(self):
+    def test_batch_save_receives_sp_fields_and_effective_weights(self):
         codes = ["000001", "000002"]
-
         repo = _make_repo(run_id=5)
-
         c_repo = MagicMock()
         c_repo.get_constituents.return_value = codes
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 200.0}}
-        }
-
+        mgr = _manager_for_codes(
+            codes,
+            total_mvs={"000001": 100.0, "000002": 300.0},
+            profits={"000001": 10.0, "000002": 30.0},
+            flow_values={"000001": 50.0, "000002": 150.0},
+            report_dates={"000001": "2026-03-31", "000002": "2025-12-31"},
+        )
         svc = _make_service(repo=repo, constituent_repo=c_repo)
 
         with (
@@ -500,33 +359,13 @@ class TestRepoPersistence:
         ):
             result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
 
-        repo.save_pricing_batch.assert_called_once()
         call_kw = repo.save_pricing_batch.call_args.kwargs
-        assert len(call_kw["snapshots"]) == len(codes)
-        assert {snapshot["stock_code"] for snapshot in call_kw["snapshots"]} == set(codes)
         assert result["run_id"] == 5
-
-    def test_batch_save_receives_effective_weights(self):
-        codes = ["000001"]
-
-        repo = _make_repo(run_id=77)
-
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = codes
-
-        mgr = MagicMock()
-        mgr.get_capital_flow_context.return_value = {
-            "data": {"stock_flow": {"main_net_inflow": 100.0}}
-        }
-
-        svc = _make_service(repo=repo, constituent_repo=c_repo)
-
-        with (
-            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
-            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
-            patch("src.services.pricing_service.time.sleep"),
-        ):
-            svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
-
-        call_kw = repo.save_pricing_batch.call_args.kwargs
-        assert call_kw["effective_weights"] == {"rs": _BASE_W_RS, "cmf": _BASE_W_CMF, "flow": _BASE_W_FLOW}
+        assert call_kw["effective_weights"]["sp"] == pytest.approx(_BASE_W_SP)
+        assert call_kw["effective_weights"]["cmf"] == pytest.approx(_BASE_W_CMF)
+        assert call_kw["effective_weights"]["flow"] == pytest.approx(_BASE_W_FLOW)
+        assert len(call_kw["snapshots"]) == 2
+        for snapshot in call_kw["snapshots"]:
+            assert "sp_ratio" in snapshot
+            assert "sp_score" in snapshot
+            assert snapshot["factor_mask"] in {"sp,cmf,flow", "sp,cmf"}

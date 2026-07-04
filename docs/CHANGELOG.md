@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [文档] 新增 SPI phase3 从动量排序切换到缠论 S/P 比价的修正方案文档。
+- [改进] SPI phase3 比价实现改为缠论 S/P 主因子 + CMF/Flow 确认，并在板块比价 API 暴露 `sp_ratio`/`sp_score` 诊断字段。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

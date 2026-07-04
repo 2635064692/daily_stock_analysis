@@ -36,6 +36,8 @@ def get_board_pricing(
                 "stock_code": r.stock_code,
                 "total": r.total,
                 "rs_score": r.rs_score,
+                "sp_ratio": r.sp_ratio,
+                "sp_score": r.sp_score,
                 "cmf": r.cmf,
                 "flow_score": r.flow_score,
                 "status": r.status,

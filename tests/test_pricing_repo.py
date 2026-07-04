@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 from datetime import date
 from types import ModuleType
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
 if "dotenv" not in sys.modules:
@@ -44,14 +45,18 @@ def _snapshot(
     *,
     total: float | None,
     rs_score: float | None = 0.5,
+    sp_ratio: float | None = 1.0,
+    sp_score: float | None = 0.5,
     cmf: float | None = 0.1,
     flow_score: float | None = None,
     status: str = "ok",
-    factor_mask: str | None = "rs,cmf",
+    factor_mask: str | None = "sp,cmf",
 ) -> dict:
     return {
         "stock_code": stock_code,
         "rs_score": rs_score,
+        "sp_ratio": sp_ratio,
+        "sp_score": sp_score,
         "cmf": cmf,
         "flow_score": flow_score,
         "total": total,
@@ -70,8 +75,8 @@ def test_save_pricing_batch_rolls_back_run_and_snapshots_on_failure(isolated_db)
             constituent_source="snapshot",
             rs_window=20,
             cmf_window=20,
-            base_weights={"rs": 0.5, "cmf": 0.3, "flow": 0.2},
-            effective_weights={"rs": 0.625, "cmf": 0.375},
+            base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+            effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
             flow_coverage=0.4,
             constituent_count=2,
             priced_count=1,
@@ -82,15 +87,19 @@ def test_save_pricing_batch_rolls_back_run_and_snapshots_on_failure(isolated_db)
                 {
                     "stock_code": "000001",
                     "rs_score": 0.8,
+                    "sp_ratio": 0.8,
+                    "sp_score": 1 / 1.8,
                     "cmf": 0.2,
                     "flow_score": None,
                     "total": 0.575,
                     "status": "ok",
-                    "factor_mask": "rs,cmf",
+                    "factor_mask": "sp,cmf",
                 },
                 {
                     "stock_code": "000002",
                     "rs_score": 0.1,
+                    "sp_ratio": None,
+                    "sp_score": None,
                     "cmf": -0.3,
                     "flow_score": None,
                     "total": None,
@@ -115,8 +124,8 @@ def test_save_pricing_batch_persists_rows_and_rank_order(isolated_db):
         constituent_source="snapshot",
         rs_window=20,
         cmf_window=20,
-        base_weights={"rs": 0.5, "cmf": 0.3, "flow": 0.2},
-        effective_weights={"rs": 0.625, "cmf": 0.375},
+        base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+        effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
         flow_coverage=0.4,
         constituent_count=3,
         priced_count=2,
@@ -144,6 +153,8 @@ def test_save_pricing_batch_persists_rows_and_rank_order(isolated_db):
     assert runs[0].priced_count == 2
     assert len(snapshots) == 3
     assert {row.run_id for row in snapshots} == {run_id}
+    assert snapshots[0].sp_ratio is not None
+    assert snapshots[0].sp_score is not None
 
 
 def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
@@ -156,15 +167,15 @@ def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
         constituent_source="snapshot",
         rs_window=20,
         cmf_window=20,
-        base_weights={"rs": 0.5, "cmf": 0.3, "flow": 0.2},
-        effective_weights={"rs": 0.625, "cmf": 0.375},
+        base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+        effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
         flow_coverage=0.0,
         constituent_count=1,
         priced_count=1,
         degraded_count=0,
         status="ok",
         error=None,
-        snapshots=[_snapshot("000001", total=0.50, rs_score=0.5, cmf=0.0)],
+        snapshots=[_snapshot("000001", total=0.50, rs_score=0.5, sp_ratio=1.2, sp_score=1 / 2.2, cmf=0.0)],
     )
     second_run = repo.save_pricing_batch(
         board_id=801010,
@@ -172,15 +183,15 @@ def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
         constituent_source="snapshot",
         rs_window=20,
         cmf_window=20,
-        base_weights={"rs": 0.5, "cmf": 0.3, "flow": 0.2},
-        effective_weights={"rs": 0.625, "cmf": 0.375},
+        base_weights={"sp": 0.6, "cmf": 0.3, "flow": 0.1},
+        effective_weights={"sp": 2 / 3, "cmf": 1 / 3},
         flow_coverage=0.0,
         constituent_count=1,
         priced_count=1,
         degraded_count=0,
         status="ok",
         error=None,
-        snapshots=[_snapshot("000001", total=0.91, rs_score=0.95, cmf=0.3)],
+        snapshots=[_snapshot("000001", total=0.91, rs_score=0.95, sp_ratio=0.7, sp_score=1 / 1.7, cmf=0.3)],
     )
 
     assert second_run > first_run
@@ -189,6 +200,8 @@ def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
     assert len(ranked) == 1
     assert ranked[0].total == pytest.approx(0.91)
     assert ranked[0].rs_score == pytest.approx(0.95)
+    assert ranked[0].sp_ratio == pytest.approx(0.7)
+    assert ranked[0].sp_score == pytest.approx(1 / 1.7)
     assert ranked[0].run_id == second_run
 
     with isolated_db.get_session() as session:
@@ -197,3 +210,41 @@ def test_save_pricing_batch_upserts_existing_snapshot_for_same_day(isolated_db):
 
     assert len(runs) == 2
     assert len(snapshots) == 1
+
+
+def test_database_manager_backfills_pricing_snapshot_sp_columns(tmp_path):
+    db_path = tmp_path / "legacy_pricing_snapshot.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE pricing_snapshot (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id INTEGER NOT NULL,
+                stock_code VARCHAR(16) NOT NULL,
+                trade_date DATE NOT NULL,
+                rs_score FLOAT,
+                cmf FLOAT,
+                flow_score FLOAT,
+                total FLOAT,
+                status VARCHAR(32) NOT NULL,
+                factor_mask VARCHAR(16),
+                run_id INTEGER
+            );
+            INSERT INTO pricing_snapshot (
+                board_id, stock_code, trade_date, rs_score, cmf, flow_score, total, status, factor_mask, run_id
+            ) VALUES (
+                801010, '000001', '2024-06-03', 0.5, 0.1, 0.2, 0.6, 'ok', 'rs,cmf,flow', 1
+            );
+            """
+        )
+
+    DatabaseManager.reset_instance()
+    db = DatabaseManager(db_url=f"sqlite:///{db_path}")
+    try:
+        columns = {column["name"] for column in inspect(db._engine).get_columns("pricing_snapshot")}
+        assert {"sp_ratio", "sp_score"} <= columns
+        with db.get_session() as session:
+            snapshot = session.execute(select(PricingSnapshot)).scalar_one()
+        assert snapshot.stock_code == "000001"
+    finally:
+        DatabaseManager.reset_instance()
