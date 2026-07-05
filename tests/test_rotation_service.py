@@ -111,6 +111,33 @@ class TestCheckEntrySignal:
         assert result == []
         repo.upsert_rotation_signal.assert_not_called()
 
+    def test_scan_entry_signals_supports_non_persistent_mode(self):
+        service, repo, constituent_repo, _ = _make_service(constituents=["600519"])
+        constituent_repo.get_constituents.return_value = ["600519"]
+
+        with patch(
+            "src.services.spi.rotation_service._get_latest",
+            return_value=self._bars_with_pullback(),
+        ):
+            result = service.scan_entry_signals(BOARD_ID, TRADE_DATE, persist=False)
+
+        assert result[0]["stock_code"] == "600519"
+        assert result[0]["matched"] is True
+        repo.upsert_rotation_signal.assert_not_called()
+
+
+class TestResolveConstituents:
+
+    def test_returns_source_metadata_for_snapshot_constituents(self):
+        service, _, constituent_repo, _ = _make_service(constituents=["600519", "000858"])
+        constituent_repo.get_constituents.return_value = ["600519", "000858"]
+
+        result = service.resolve_constituents(BOARD_ID, TRADE_DATE)
+
+        assert result["codes"] == ["600519", "000858"]
+        assert result["source"] == "snapshot"
+        assert result["snapshot"] is None
+
 
 class TestCheckExitSignal:
 

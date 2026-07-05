@@ -136,6 +136,37 @@ class TestSaveAndGetConstituents:
         assert snapshot is None
         assert repo.get_constituents(BOARD, date(2026, 2, 16)) == []
 
+    def test_reads_snapshot_from_mirror_database_when_primary_missing(self, tmp_path, db):
+        mirror_path = tmp_path / "mirror_constituents.sqlite"
+        with sqlite3.connect(mirror_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE constituent_snapshot (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    board_id INTEGER NOT NULL,
+                    trade_date DATE NOT NULL,
+                    stock_codes_json TEXT NOT NULL,
+                    created_at DATETIME,
+                    origin_trade_date DATE,
+                    is_stale BOOLEAN,
+                    snapshot_age_days INTEGER
+                );
+                INSERT INTO constituent_snapshot (
+                    board_id, trade_date, stock_codes_json, created_at, origin_trade_date, is_stale, snapshot_age_days
+                ) VALUES (
+                    801010, '2026-01-12', '["600519","000858"]', CURRENT_TIMESTAMP, '2026-01-12', 0, 0
+                );
+                """
+            )
+
+        repo = ConstituentSnapshotRepo(db_manager=db, mirror_db_path=str(mirror_path))
+
+        snapshot = repo.get_snapshot_state(BOARD, D1)
+
+        assert snapshot is not None
+        assert snapshot.stock_codes == ["600519", "000858"]
+        assert snapshot.trade_date == D1
+
 
 class TestConstituentFetcher:
 

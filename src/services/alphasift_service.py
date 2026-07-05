@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
+from src.services.run_diagnostics import record_custom_flow_event
 
 logger = logging.getLogger(__name__)
 
@@ -1146,7 +1147,7 @@ class AlphaSiftService:
         }
 
     def _screen_sector_rotation(self, *, market: str, max_results: int, enable_pricing_filter: bool) -> Dict[str, Any]:
-        from src.services.spi.rotation_screening import SectorRotationScreener
+        from src.services.spi.rotation_alphasift_runtime import AlphaSiftSectorRotationRuntime
         from src.services.spi.spi_time import spi_time
 
         if market != "cn":
@@ -1156,9 +1157,9 @@ class AlphaSiftService:
             )
 
         trade_date = spi_time()
-        screener = SectorRotationScreener()
+        runtime = AlphaSiftSectorRotationRuntime()
         try:
-            result = screener.screen(trade_date=trade_date, max_results=max_results)
+            result = runtime.run(trade_date=trade_date, max_results=max_results)
         except Exception as exc:
             raise HTTPException(
                 status_code=424,
@@ -1171,7 +1172,49 @@ class AlphaSiftService:
             pf = PricingFilter()
             candidates = pf.apply(candidates, trade_date=trade_date)
 
+        record_custom_flow_event(
+            event_type="rotation_dsa_enrich_started",
+            node_id="rotation_dsa_enrich",
+            title="DSA 增强",
+            severity="info",
+            message="正在补充候选股票的 DSA 上下文",
+            metadata={
+                "tradeDate": str(trade_date),
+                "requestedCount": len(candidates),
+            },
+            node={
+                "id": "rotation_dsa_enrich",
+                "lane": "artifact",
+                "kind": "artifact",
+                "label": "DSA 增强",
+                "status": "running",
+                "started_at": _utc_now_iso(),
+                "message": "正在补充候选股票的 DSA 上下文",
+            },
+        )
         candidates, dsa_enrichment = _enrich_candidates_with_dsa(candidates)
+        record_custom_flow_event(
+            event_type="rotation_dsa_enrich_completed",
+            node_id="rotation_dsa_enrich",
+            title="DSA 增强",
+            severity="success" if dsa_enrichment.get("enriched_count") else "warning",
+            message=f"DSA 已增强 {dsa_enrichment.get('enriched_count', 0)} / {dsa_enrichment.get('requested_count', 0)} 个候选",
+            metadata={
+                "tradeDate": str(trade_date),
+                "requestedCount": dsa_enrichment.get("requested_count"),
+                "enrichedCount": dsa_enrichment.get("enriched_count"),
+                "warningCount": len(dsa_enrichment.get("warnings") or []),
+            },
+            node={
+                "id": "rotation_dsa_enrich",
+                "lane": "artifact",
+                "kind": "artifact",
+                "label": "DSA 增强",
+                "status": "success" if dsa_enrichment.get("enriched_count") else "degraded",
+                "ended_at": _utc_now_iso(),
+                "message": f"DSA 已增强 {dsa_enrichment.get('enriched_count', 0)} / {dsa_enrichment.get('requested_count', 0)} 个候选",
+            },
+        )
         return {
             "enabled": True,
             "candidates": candidates,

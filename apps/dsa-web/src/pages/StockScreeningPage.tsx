@@ -24,6 +24,7 @@ import {
   Stethoscope,
   Trees,
   Utensils,
+  Workflow,
   Wrench,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -38,7 +39,8 @@ import {
   type AlphaSiftStrategy,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
-import { AppPage, Button, InlineAlert } from '../components/common';
+import { RunFlowPanel } from '../components/run-flow';
+import { AppPage, Button, Drawer, InlineAlert } from '../components/common';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
@@ -463,8 +465,10 @@ const StockScreeningPage: React.FC = () => {
   const [error, setError] = useState('');
   const [strategyLoadError, setStrategyLoadError] = useState('');
   const [activeTaskId, setActiveTaskId] = useState<string | null>(restoredTask?.taskId ?? null);
+  const [lastTaskId, setLastTaskId] = useState<string | null>(restoredTask?.taskId ?? null);
   const [taskProgress, setTaskProgress] = useState(restoredTask?.taskId ? 10 : 0);
   const [taskMessage, setTaskMessage] = useState(restoredTask?.taskId ? '正在恢复选股任务状态...' : '');
+  const [runFlowOpen, setRunFlowOpen] = useState(false);
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
@@ -815,6 +819,7 @@ const StockScreeningPage: React.FC = () => {
         maxResults,
       });
       setActiveTaskId(task.taskId);
+      setLastTaskId(task.taskId);
       setTaskProgress(0);
       setTaskMessage(task.message || 'AlphaSift 选股任务已提交');
     } catch (err) {
@@ -1246,7 +1251,7 @@ const StockScreeningPage: React.FC = () => {
             </div>
           </div>
           <div className="grid gap-1 text-xs text-secondary-text sm:text-right">
-            <span>任务：{activeTaskId ? activeTaskId.slice(0, 12) : '-'}</span>
+            <span>任务：{(activeTaskId || lastTaskId) ? String(activeTaskId || lastTaskId).slice(0, 12) : '-'}</span>
             <span>Run ID：{screenMeta?.runId || '-'}</span>
             <span>
               快照 {screenMeta?.snapshotCount ?? '-'} · 过滤后 {screenMeta?.afterFilterCount ?? '-'} · 候选 {screenMeta?.candidateCount ?? candidates.length}
@@ -1260,6 +1265,14 @@ const StockScreeningPage: React.FC = () => {
             </span>
           </div>
         </div>
+        {lastTaskId ? (
+          <div className="mt-4 flex justify-end">
+            <Button size="sm" variant="secondary" onClick={() => setRunFlowOpen(true)}>
+              <Workflow className="h-4 w-4" />
+              查看工作流
+            </Button>
+          </div>
+        ) : null}
       </section>
 
       {screenMeta && alertMessages.length > 0 ? (
@@ -1449,6 +1462,21 @@ const StockScreeningPage: React.FC = () => {
           </div>
         )}
       </section>
+      {runFlowOpen && lastTaskId ? (
+        <Drawer
+          isOpen={runFlowOpen}
+          onClose={() => setRunFlowOpen(false)}
+          title="AlphaSift 选股工作流"
+          width="max-w-[96vw]"
+          zIndex={80}
+        >
+          <RunFlowPanel
+            key={lastTaskId}
+            source={{ type: 'task', taskId: lastTaskId }}
+            title={`AlphaSift 选股工作流 · ${strategy}`}
+          />
+        </Drawer>
+      ) : null}
     </AppPage>
   );
 };

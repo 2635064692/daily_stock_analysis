@@ -6,7 +6,7 @@ from functools import lru_cache
 import logging
 from datetime import date
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 import yaml
@@ -171,52 +171,16 @@ class RotationService:
         pullback_tolerance: float = 0.02,
         stock_codes: Optional[List[str]] = None,
     ) -> List[str]:
-        codes = stock_codes if stock_codes is not None else self._constituent_repo.get_constituents(
+        matches = self.scan_entry_signals(
             board_id,
             trade_date,
+            entry_ema_period=entry_ema_period,
+            volume_ratio_threshold=volume_ratio_threshold,
+            pullback_tolerance=pullback_tolerance,
+            stock_codes=stock_codes,
+            persist=True,
         )
-        if not codes:
-            return []
-
-        triggered: List[str] = []
-        for stock_code in codes:
-            try:
-                rows = _get_latest(stock_code, entry_ema_period + 5)
-                if not rows:
-                    continue
-                rows_asc = list(reversed(rows))
-                closes = [row.close for row in rows_asc if row.close is not None]
-                volumes = [row.volume for row in rows_asc if row.volume is not None]
-                if len(closes) < 2:
-                    continue
-
-                ema_val = pd.Series(closes).ewm(span=entry_ema_period, adjust=False).mean().iloc[-1]
-                last_close = closes[-1]
-
-                if len(volumes) >= entry_ema_period:
-                    vol_mean = sum(volumes[-entry_ema_period:]) / entry_ema_period
-                    volume_ratio = (volumes[-1] / vol_mean) if vol_mean > 0 else 0.0
-                else:
-                    volume_ratio = 0.0
-
-                if last_close <= ema_val * (1 + pullback_tolerance) and volume_ratio >= volume_ratio_threshold:
-                    self._repo.upsert_rotation_signal(
-                        board_id=board_id,
-                        stock_code=stock_code,
-                        trade_date=trade_date,
-                        action="BUY",
-                        reason=f"pullback to EMA{entry_ema_period}, vol_ratio={volume_ratio:.2f}",
-                    )
-                    triggered.append(stock_code)
-            except Exception:
-                logger.warning(
-                    "check_entry failed for board=%s stock=%s",
-                    board_id,
-                    stock_code,
-                    exc_info=True,
-                )
-
-        return triggered
+        return [item["stock_code"] for item in matches if item.get("matched")]
 
     def check_exit(
         self,
@@ -291,14 +255,14 @@ class RotationService:
 
         return triggered
 
-    def _get_snapshot_constituents(self, board_id: int, trade_date: date) -> List[str]:
+    def resolve_constituents(self, board_id: int, trade_date: date) -> Dict[str, Any]:
         if isinstance(self._constituent_repo, ConstituentSnapshotRepo) and isinstance(self._fetcher, ConstituentFetcher):
             resolver = ConstituentRuntimeResolver(
                 repo=self._constituent_repo,
                 fetcher=self._fetcher,
                 current_trade_date_provider=spi_time,
             )
-            codes, _source, snapshot = resolver.resolve(board_id, trade_date)
+            codes, source, snapshot = resolver.resolve(board_id, trade_date)
             if snapshot is not None and snapshot.is_stale:
                 logger.info(
                     "rotation using stale constituent snapshot board_id=%s trade_date=%s "
@@ -308,11 +272,19 @@ class RotationService:
                     snapshot.origin_trade_date,
                     snapshot.snapshot_age_days,
                 )
-            return codes
+            return {
+                "codes": codes,
+                "source": source,
+                "snapshot": snapshot,
+            }
 
         existing_codes = self._constituent_repo.get_constituents(board_id, trade_date)
         if existing_codes:
-            return existing_codes
+            return {
+                "codes": existing_codes,
+                "source": "snapshot",
+                "snapshot": None,
+            }
 
         fetched_codes = self._fetcher.fetch(board_id)
         if not fetched_codes:
@@ -321,10 +293,121 @@ class RotationService:
                 board_id,
                 trade_date,
             )
-            return []
+            return {
+                "codes": [],
+                "source": "missing",
+                "snapshot": None,
+            }
 
         self._constituent_repo.save_constituents(board_id, trade_date, fetched_codes)
-        return fetched_codes
+        return {
+            "codes": fetched_codes,
+            "source": "current",
+            "snapshot": None,
+        }
+
+    def scan_entry_signals(
+        self,
+        board_id: int,
+        trade_date: date,
+        entry_ema_period: int = 20,
+        volume_ratio_threshold: float = 1.2,
+        pullback_tolerance: float = 0.02,
+        stock_codes: Optional[List[str]] = None,
+        *,
+        persist: bool = False,
+    ) -> List[Dict[str, Any]]:
+        codes = stock_codes if stock_codes is not None else self._constituent_repo.get_constituents(
+            board_id,
+            trade_date,
+        )
+        if not codes:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for stock_code in codes:
+            try:
+                result = self._evaluate_entry_signal(
+                    stock_code=stock_code,
+                    entry_ema_period=entry_ema_period,
+                    volume_ratio_threshold=volume_ratio_threshold,
+                    pullback_tolerance=pullback_tolerance,
+                )
+                result["board_id"] = board_id
+                if persist and result.get("matched"):
+                    self._repo.upsert_rotation_signal(
+                        board_id=board_id,
+                        stock_code=stock_code,
+                        trade_date=trade_date,
+                        action="BUY",
+                        reason=str(result.get("reason") or ""),
+                    )
+                results.append(result)
+            except Exception:
+                logger.warning(
+                    "check_entry failed for board=%s stock=%s",
+                    board_id,
+                    stock_code,
+                    exc_info=True,
+                )
+        return results
+
+    def _get_snapshot_constituents(self, board_id: int, trade_date: date) -> List[str]:
+        resolved = self.resolve_constituents(board_id, trade_date)
+        codes = resolved.get("codes")
+        return list(codes) if isinstance(codes, list) else []
+
+    def _evaluate_entry_signal(
+        self,
+        *,
+        stock_code: str,
+        entry_ema_period: int,
+        volume_ratio_threshold: float,
+        pullback_tolerance: float,
+    ) -> Dict[str, Any]:
+        rows = _get_latest(stock_code, entry_ema_period + 5)
+        if not rows:
+            return {
+                "stock_code": stock_code,
+                "matched": False,
+                "reason": "no_price_data",
+            }
+        rows_asc = list(reversed(rows))
+        closes = [row.close for row in rows_asc if row.close is not None]
+        volumes = [row.volume for row in rows_asc if row.volume is not None]
+        if len(closes) < 2:
+            return {
+                "stock_code": stock_code,
+                "matched": False,
+                "reason": "insufficient_close_data",
+            }
+
+        ema_val = float(pd.Series(closes).ewm(span=entry_ema_period, adjust=False).mean().iloc[-1])
+        last_close = float(closes[-1])
+
+        if len(volumes) >= entry_ema_period:
+            vol_mean = sum(volumes[-entry_ema_period:]) / entry_ema_period
+            volume_ratio = float((volumes[-1] / vol_mean) if vol_mean > 0 else 0.0)
+        else:
+            volume_ratio = 0.0
+
+        matched = last_close <= ema_val * (1 + pullback_tolerance) and volume_ratio >= volume_ratio_threshold
+        reason = (
+            f"pullback to EMA{entry_ema_period}, vol_ratio={volume_ratio:.2f}"
+            if matched
+            else "entry_rule_not_matched"
+        )
+        return {
+            "stock_code": stock_code,
+            "matched": matched,
+            "reason": reason,
+            "ema_period": entry_ema_period,
+            "ema_value": round(ema_val, 4),
+            "last_close": round(last_close, 4),
+            "volume_ratio": round(volume_ratio, 4),
+            "volume_ratio_threshold": volume_ratio_threshold,
+            "pullback_tolerance": pullback_tolerance,
+        }
 
 
 def _get_latest(stock_code: str, days: int):

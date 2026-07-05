@@ -1039,6 +1039,45 @@ def record_history_run(
         logger.warning("history diagnostic record failed: %s", exc)
 
 
+def record_custom_flow_event(
+    *,
+    event_type: str,
+    title: str,
+    node_id: Optional[str] = None,
+    severity: str = "info",
+    message: Optional[Any] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    node: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[Any] = None,
+) -> None:
+    """Emit a custom live run-flow event for task-local business stages.
+
+    This helper is intentionally live-only: it feeds the current task queue
+    event sink without modifying persisted provider / llm / history diagnostics.
+    """
+    context = get_current_diagnostic_context()
+    if context is None:
+        return
+
+    try:
+        payload: Dict[str, Any] = {
+            "timestamp": timestamp or datetime.now().isoformat(),
+            "severity": severity if severity in {"info", "success", "warning", "danger"} else "info",
+            "type": _safe_event_key(event_type) or "custom_event",
+            "node_id": node_id,
+            "title": sanitize_diagnostic_text(title, max_length=100) or "运行事件",
+            "message": sanitize_diagnostic_text(message, max_length=220),
+            "metadata": _clean_metadata(metadata or {}),
+        }
+        if node:
+            payload_metadata = dict(payload.get("metadata") or {})
+            payload_metadata["node"] = _clean_metadata(node)
+            payload["metadata"] = payload_metadata
+        context._emit_flow_event(payload)
+    except Exception as exc:  # pragma: no cover - defensive fail-open guard
+        logger.warning("custom flow event record failed: %s", exc)
+
+
 _SUMMARY_STATUS_LABELS = {
     "normal": "正常",
     "degraded": "部分降级",

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 成分股快照新增 `origin_trade_date` / `is_stale` / `snapshot_age_days` 元数据；当前交易日默认可沿用最近 22 个交易日内的已落盘快照，并对外部成分股源增加 30 秒重拉间隔以降低 429/504。
 - [新功能] 新增 `scripts/hydrate_spi_data.py` 同步补齐脚本，可按交易日生成 SPI v1/v2、轮动信号与板块比价数据，并输出 readiness 摘要辅助 AlphaSift `sector_rotation` 联调。
 - [新功能] AlphaSift 新增 `sector_rotation` 选股策略并支持可选 `enable_pricing_filter` 后处理，复用 SPI v2、轮动 BUY 信号与板块内比价快照。
+- [新功能] AlphaSift `sector_rotation` 升级为实时执行式板块轮动选股链，并支持在选股页/首页查看任务工作流节点详情。
 - [文档] 新增 SPI phase3 从动量排序切换到缠论 S/P 比价的修正方案文档。
 - [改进] SPI phase3 比价实现改为缠论 S/P 主因子 + CMF/Flow 确认，并在板块比价 API 暴露 `sp_ratio`/`sp_score` 诊断字段。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->

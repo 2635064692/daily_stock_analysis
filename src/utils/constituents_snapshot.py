@@ -2,6 +2,9 @@
 from dataclasses import dataclass
 import json
 import logging
+import os
+from pathlib import Path
+import sqlite3
 import time
 from datetime import date
 from io import StringIO
@@ -112,8 +115,16 @@ def _normalize_stock_code(raw_code) -> str:
 
 class ConstituentSnapshotRepo:
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        *,
+        mirror_db_path: Optional[str] = None,
+    ):
         self.db = db_manager or DatabaseManager.get_instance()
+        self._mirror_db_path = _resolve_constituent_snapshot_mirror_path(
+            mirror_db_path or os.getenv("CONSTITUENT_SNAPSHOT_DATABASE_PATH")
+        )
 
     def save_constituents(
         self,
@@ -181,7 +192,7 @@ class ConstituentSnapshotRepo:
                 )
             ).scalar_one_or_none()
             if row is None:
-                return None
+                return self._read_snapshot_state_from_mirror(board_id, trade_date)
             return _snapshot_state_from_row(row)
 
     def get_latest_snapshot_state(
@@ -202,7 +213,7 @@ class ConstituentSnapshotRepo:
                 .limit(1)
             ).scalar_one_or_none()
             if row is None:
-                return None
+                return self._read_latest_snapshot_state_from_mirror(board_id, trade_date)
             return _snapshot_state_from_row(row)
 
     def materialize_recent_snapshot(
@@ -230,6 +241,60 @@ class ConstituentSnapshotRepo:
             snapshot_age_days=snapshot_age_days,
         )
         return self.get_snapshot_state(board_id, trade_date)
+
+    def _read_snapshot_state_from_mirror(
+        self,
+        board_id: int,
+        trade_date: date,
+    ) -> Optional[ConstituentSnapshotState]:
+        row = self._query_mirror_snapshot(
+            """
+            SELECT board_id, trade_date, stock_codes_json, origin_trade_date, is_stale, snapshot_age_days
+            FROM constituent_snapshot
+            WHERE board_id = ? AND trade_date = ?
+            LIMIT 1
+            """,
+            (int(board_id), str(trade_date)),
+        )
+        return _snapshot_state_from_sqlite_row(row) if row is not None else None
+
+    def _read_latest_snapshot_state_from_mirror(
+        self,
+        board_id: int,
+        trade_date: date,
+    ) -> Optional[ConstituentSnapshotState]:
+        row = self._query_mirror_snapshot(
+            """
+            SELECT board_id, trade_date, stock_codes_json, origin_trade_date, is_stale, snapshot_age_days
+            FROM constituent_snapshot
+            WHERE board_id = ? AND trade_date <= ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """,
+            (int(board_id), str(trade_date)),
+        )
+        return _snapshot_state_from_sqlite_row(row) if row is not None else None
+
+    def _query_mirror_snapshot(
+        self,
+        sql: str,
+        params: tuple,
+    ) -> Optional[sqlite3.Row]:
+        if self._mirror_db_path is None:
+            return None
+        try:
+            with sqlite3.connect(self._mirror_db_path) as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(sql, params).fetchone()
+                return row
+        except Exception as exc:
+            logger.warning(
+                "constituent mirror db query failed path=%s params=%s err=%s",
+                self._mirror_db_path,
+                params,
+                exc,
+            )
+            return None
 
 
 class ConstituentRuntimeResolver:
@@ -315,6 +380,41 @@ def _snapshot_state_from_row(row: ConstituentSnapshot) -> ConstituentSnapshotSta
         is_stale=bool(row.is_stale),
         snapshot_age_days=int(stored_age or 0),
     )
+
+
+def _snapshot_state_from_sqlite_row(row: sqlite3.Row) -> ConstituentSnapshotState:
+    trade_date = _parse_sqlite_date(row["trade_date"])
+    origin_trade_date = _parse_sqlite_date(row["origin_trade_date"]) or trade_date
+    raw_age = row["snapshot_age_days"]
+    stored_age = int(raw_age or 0)
+    is_stale = bool(row["is_stale"])
+    if stored_age == 0 and trade_date != origin_trade_date:
+        stored_age = _calculate_snapshot_age_days(origin_trade_date, trade_date)
+    return ConstituentSnapshotState(
+        board_id=int(row["board_id"]),
+        trade_date=trade_date,
+        stock_codes=json.loads(row["stock_codes_json"]),
+        origin_trade_date=origin_trade_date,
+        is_stale=is_stale,
+        snapshot_age_days=stored_age,
+    )
+
+
+def _parse_sqlite_date(value: object) -> date:
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _resolve_constituent_snapshot_mirror_path(value: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.exists():
+        logger.warning("constituent snapshot mirror db not found: %s", path)
+        return None
+    return str(path)
 
 
 def _calculate_snapshot_age_days(origin_trade_date: date, trade_date: date) -> int:

@@ -241,6 +241,13 @@ AlphaSift 侧已在 `ZhuLinsen/alphasift@377049857cc04175dc3cca62121ee41adec6cdb
 - 选股页自己的结果恢复依赖 `sessionStorage + /api/v1/alphasift/screen/tasks/{task_id}` 轮询；首页任务面板与运行流查看依赖 `TaskQueue + /api/v1/analysis/tasks*` 通用链路，两者是并行复用而不是互相调用。
 - 外部 `alphasift.dsa_adapter` 内部未经过 DSA 诊断层的步骤，不一定都会出现在运行流里；当前可见节点以 TaskQueue 骨架和已接入 `run_diagnostics` 的 DSA 侧事件为准。
 
+#### 可选成分股镜像库
+
+- 默认情况下，SPI 轮动链路和板块内比价链路从主库 `DATABASE_PATH` 读取 `constituent_snapshot`。
+- 如需复用单独的成分股快照 SQLite 文件（例如 `data/stock_analysis.db.bak-real-constituents-20260703`），可设置：
+  - `CONSTITUENT_SNAPSHOT_DATABASE_PATH=/absolute/or/relative/path/to/sqlite.db`
+- 设置后，当主库缺少指定 `board_id + trade_date` 的 `constituent_snapshot` 记录时，系统会从该镜像库**只读补查**成分股快照；新抓取的成分股、运行期 materialize 的 stale snapshot、BUY 信号和 pricing 结果仍写回主库，不会改写镜像库本身。
+
 ## 桌面端说明
 
 源码运行的桌面端复用同一个 Python 后端环境，并设置 `DSA_DESKTOP_MODE=true`；通过设置页开启时如缺少适配层，会提示更新依赖或重建后端产物。

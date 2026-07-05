@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
@@ -1559,6 +1559,72 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 403)
         self.assertEqual(caught.exception.detail["error"], "alphasift_disabled")
 
+    def test_sector_rotation_screen_runs_realtime_runtime(self) -> None:
+        config = self._config(enabled=True)
+
+        with (
+            patch("src.services.spi.spi_time.spi_time", return_value=date(2026, 7, 5)),
+            patch(
+                "src.services.spi.rotation_alphasift_runtime.AlphaSiftSectorRotationRuntime.run",
+                return_value={
+                    "candidates": [
+                        {
+                            "code": "600519",
+                            "board_id": 801010,
+                            "board_name": "农林牧渔",
+                            "board_v2_score": 88.0,
+                            "pricing_rank": 1,
+                            "total": 0.91,
+                            "status": "ok",
+                            "selection_reason": "板块轮动BUY信号",
+                        }
+                    ],
+                    "rotation_boards": 1,
+                    "snapshot_source": "spi_v2:realtime_rotation_runtime",
+                    "warnings": [],
+                },
+            ) as runtime_mock,
+            patch(
+                "src.services.alphasift_service._enrich_candidates_with_dsa",
+                return_value=(
+                    [
+                        {
+                            "code": "600519",
+                            "board_id": 801010,
+                            "board_name": "农林牧渔",
+                            "board_v2_score": 88.0,
+                            "pricing_rank": 1,
+                            "total": 0.91,
+                            "status": "ok",
+                            "selection_reason": "板块轮动BUY信号",
+                        }
+                    ],
+                    {
+                        "enabled": True,
+                        "max_candidates": 3,
+                        "requested_count": 1,
+                        "enriched_count": 1,
+                        "warnings": [],
+                    },
+                ),
+            ) as enrich_mock,
+        ):
+            payload = self._screen(
+                config,
+                mock_enrichment=False,
+                market="cn",
+                strategy="sector_rotation",
+                max_results=5,
+            )
+
+        runtime_mock.assert_called_once()
+        enrich_mock.assert_called_once()
+        self.assertEqual(payload["strategy"], "sector_rotation")
+        self.assertEqual(payload["snapshot_source"], "spi_v2:realtime_rotation_runtime")
+        self.assertEqual(payload["rotation_boards"], 1)
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["candidates"][0]["code"], "600519")
+
     def test_screen_rejects_when_alphasift_unavailable(self) -> None:
         config = self._config(enabled=True)
 
@@ -2850,7 +2916,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
         with (
             patch("src.services.alphasift_service.importlib.import_module", return_value=fake_daily_module),
-            patch("src.services.alphasift_service.get_dsa_daily_history", dsa_history),
+            patch.object(alphasift_service, "get_dsa_daily_history", dsa_history),
         ):
             with alphasift_service._alphasift_dsa_daily_history_provider():
                 result = fake_daily_module.fetch_daily_history(

@@ -378,11 +378,22 @@ class PricingService:
             "run_id": run_id,
             "flow_coverage": flow_coverage,
             "flow_enabled": flow_enabled,
+            "constituent_source": constituent_source,
             "constituent_count": len(codes),
             "priced_count": priced_count,
             "degraded_count": degraded_count,
             "stocks": [
-                {"stock_code": r["stock_code"], "status": r["status"], "total": r["total"]}
+                {
+                    "stock_code": r["stock_code"],
+                    "status": r["status"],
+                    "total": r["total"],
+                    "rs_score": r["rs_score"],
+                    "sp_ratio": r["sp_ratio"],
+                    "sp_score": r["sp_score"],
+                    "cmf": r["cmf"],
+                    "flow_score": r["flow_score"],
+                    "factor_mask": r["factor_mask"],
+                }
                 for r in stock_results
             ],
         }
