@@ -193,6 +193,54 @@ AlphaSift 侧已在 `ZhuLinsen/alphasift@377049857cc04175dc3cca62121ee41adec6cdb
 - 结果页展示运行 ID、样本数量、过滤后数量、LLM 是否重排、LLM 覆盖率和 DSA 增强计数；如果 AlphaSift 返回 warning/source error/LLM parse error 或 `llm_ranked=false`，页面会明确显示降级原因，避免把本地因子结果误展示成正常 LLM 判断；重复的快照源 fallback warning/source error 会在前端合并展示为一条“数据源降级”提示。
 - 展开候选时展示 AlphaSift 摘要、因子和 LLM 判断；若 DSA 已增强，还会展示 `DSA 增强摘要`、`DSA 新闻` 和 `DSA 增强提示`。
 
+### 首页任务面板与运行流链路
+
+当前 AlphaSift 选股任务**不持久化运行流快照**，但在任务活跃期间会复用全站统一的任务队列、SSE 与运行流面板，因此仍可在首页看到任务并打开运行流。
+
+#### 实现链路
+
+1. **选股页提交任务**
+   - `apps/dsa-web/src/pages/StockScreeningPage.tsx` 点击“运行选股”后调用 `alphasiftApi.startScreen(...)`。
+   - 前端请求 `POST /api/v1/alphasift/screen/tasks`，并把返回的 `taskId` 写入当前 tab 的 `sessionStorage`，用于选股页自身的轮询恢复。
+
+2. **AlphaSift 接口把任务放进全局 TaskQueue**
+   - `api/v1/endpoints/alphasift.py` 的 `alphasift_start_screen_task()` 会调用 `get_task_queue().submit_background_task(...)`。
+   - 该任务会以 `report_type="alphasift_screen"`、`stock_code="alphasift_screen"`、`trace_id=task_id` 的形式进入统一后台任务队列，而不是单独维护 AlphaSift 私有任务池。
+
+3. **TaskQueue 广播通用任务事件**
+   - `src/services/task_queue.py` 会为后台任务统一维护 `task_created / task_started / task_progress / task_completed / task_failed` 生命周期事件。
+   - AlphaSift 任务还会在提交后的执行阶段额外调用 `update_task_progress(...)` 更新进度文案，因此首页和选股页看到的是同一个任务状态源。
+
+4. **首页从通用任务系统读取活跃任务**
+   - `apps/dsa-web/src/hooks/useDashboardLifecycle.ts` 在首页加载、定时刷新和页面重新可见时调用 `refreshActiveTasks()`。
+   - `apps/dsa-web/src/stores/stockPoolStore.ts` 的 `refreshActiveTasks()` 会请求 `GET /api/v1/analysis/tasks?status=pending,processing,cancel_requested`。
+   - `api/v1/endpoints/analysis.py` 的 `get_task_list()` 直接读取同一个 `TaskQueue`，因此 AlphaSift 活跃任务会自然出现在首页 `TaskPanel` 中。
+
+5. **首页通过 SSE 实时同步任务状态**
+   - `useDashboardLifecycle()` 同时启用 `useTaskStream()`，订阅 `GET /api/v1/analysis/tasks/stream`。
+   - 后端 `task_stream()` 会把 TaskQueue 广播的统一事件继续通过 SSE 推送给前端。
+   - 首页收到事件后调用 `syncTaskCreated / syncTaskUpdated / syncTaskFailed`，实时更新任务面板，不依赖 AlphaSift 页面主动回传状态。
+
+6. **点击首页任务的 Workflow 按钮打开运行流**
+   - `apps/dsa-web/src/components/tasks/TaskPanel.tsx` 为每个活跃任务提供 Workflow 按钮。
+   - `apps/dsa-web/src/pages/HomePage.tsx` 的 `openTaskRunFlow()` 会打开 `RunFlowPanel`，并传入 `source={{ type: 'task', taskId }}`。
+
+7. **RunFlowPanel 读取任务运行流快照**
+   - `apps/dsa-web/src/hooks/useRunFlowSnapshot.ts` 会请求 `GET /api/v1/analysis/tasks/{task_id}/flow`。
+   - `api/v1/endpoints/analysis.py` 的 `get_task_run_flow()` 对活跃任务直接调用 `src/services/run_flow.py` 中的 `build_task_run_flow_snapshot(task)`，从内存任务构建快照。
+
+8. **运行流快照由任务骨架 + flow_events 组成**
+   - 骨架信息来自 `TaskInfo`：`task_id / status / progress / message / created_at / started_at / completed_at`。
+   - 细粒度节点与时间线来自 `TaskInfo.flow_events`。
+   - `src/services/task_queue.py` 在执行后台任务时会激活 `run_diagnostic_context`，并把运行时事件 sink 到当前任务的 `flow_events`；`src/services/run_diagnostics.py` 负责定义 provider / llm / artifact 等事件结构。
+   - 因此，AlphaSift 任务在首页运行流中看到的并不是单独的“AlphaSift 专属存储”，而是复用了 DSA 通用运行流模型。
+
+#### 当前边界
+
+- 运行流快照默认只保存在内存任务对象中；服务重启、任务清理或任务过期后，首页无法继续从活跃任务入口查看该 AlphaSift 运行流。
+- 选股页自己的结果恢复依赖 `sessionStorage + /api/v1/alphasift/screen/tasks/{task_id}` 轮询；首页任务面板与运行流查看依赖 `TaskQueue + /api/v1/analysis/tasks*` 通用链路，两者是并行复用而不是互相调用。
+- 外部 `alphasift.dsa_adapter` 内部未经过 DSA 诊断层的步骤，不一定都会出现在运行流里；当前可见节点以 TaskQueue 骨架和已接入 `run_diagnostics` 的 DSA 侧事件为准。
+
 ## 桌面端说明
 
 源码运行的桌面端复用同一个 Python 后端环境，并设置 `DSA_DESKTOP_MODE=true`；通过设置页开启时如缺少适配层，会提示更新依赖或重建后端产物。

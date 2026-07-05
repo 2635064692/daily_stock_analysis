@@ -11,3 +11,4 @@
 ## 初始文档
 
 - `core-beliefs.md`
+- `alphasift-realtime-sector-rotation.md`
