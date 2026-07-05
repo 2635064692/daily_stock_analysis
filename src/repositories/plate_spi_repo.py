@@ -90,6 +90,31 @@ class PlateSpiRepository:
             ).scalars().all()
             return list(rows)
 
+    def find_board_universe(self, *, anchor_date: Optional[date] = None) -> List[dict]:
+        with self.db.get_session() as session:
+            trade_date_query = select(func.max(PlateSpiSnapshot.trade_date))
+            if anchor_date is not None:
+                trade_date_query = trade_date_query.where(
+                    PlateSpiSnapshot.trade_date <= anchor_date
+                )
+            resolved_date = session.execute(trade_date_query).scalar_one_or_none()
+            if resolved_date is None:
+                return []
+
+            rows = session.execute(
+                select(PlateSpiSnapshot)
+                .where(PlateSpiSnapshot.trade_date == resolved_date)
+                .order_by(PlateSpiSnapshot.board_id.asc())
+            ).scalars().all()
+            return [
+                {
+                    "board_id": item.board_id,
+                    "board_name": item.board_name,
+                    "trade_date": item.trade_date,
+                }
+                for item in rows
+            ]
+
     def create_backfill_task_run(
         self,
         *,

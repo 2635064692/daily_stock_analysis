@@ -31,6 +31,11 @@ class RotationStrategyConfig:
     pullback_tolerance: float = 0.02
     exit_top_m: int = 50
     exit_ema_period: int = 5
+    daily_history_enabled: bool = True
+    daily_history_max_workers: int = 4
+
+    def required_daily_history_days(self) -> int:
+        return max(self.entry_ema_period + 5, 30)
 
 
 def _positive_int(value, default: int) -> int:
@@ -49,6 +54,19 @@ def _nonnegative_float(value, default: float) -> float:
     return parsed if parsed >= 0 else default
 
 
+def _bool_value(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @lru_cache(maxsize=1)
 def load_rotation_strategy_config() -> RotationStrategyConfig:
     defaults = RotationStrategyConfig()
@@ -65,6 +83,7 @@ def load_rotation_strategy_config() -> RotationStrategyConfig:
     entry = payload.get("entry") or {}
     exit_cfg = payload.get("exit") or {}
     watchpool = payload.get("watchpool") or {}
+    daily_history = payload.get("daily_history") or {}
     return RotationStrategyConfig(
         watchpool_top_n=_positive_int(watchpool.get("top_n"), defaults.watchpool_top_n),
         entry_ema_period=_positive_int(entry.get("ema_period"), defaults.entry_ema_period),
@@ -78,6 +97,14 @@ def load_rotation_strategy_config() -> RotationStrategyConfig:
         ),
         exit_top_m=_positive_int(exit_cfg.get("top_m"), defaults.exit_top_m),
         exit_ema_period=_positive_int(exit_cfg.get("ema_period"), defaults.exit_ema_period),
+        daily_history_enabled=_bool_value(
+            daily_history.get("enabled"),
+            defaults.daily_history_enabled,
+        ),
+        daily_history_max_workers=_positive_int(
+            daily_history.get("max_workers"),
+            defaults.daily_history_max_workers,
+        ),
     )
 
 

@@ -278,6 +278,9 @@ class TestRotationStrategyConfigLoading:
                 "  ema_period: 8",
                 "watchpool:",
                 "  top_n: 12",
+                "daily_history:",
+                "  enabled: true",
+                "  max_workers: 6",
             ]),
             encoding="utf-8",
         )
@@ -296,4 +299,6 @@ class TestRotationStrategyConfigLoading:
             pullback_tolerance=0.03,
             exit_top_m=40,
             exit_ema_period=8,
+            daily_history_enabled=True,
+            daily_history_max_workers=6,
         )

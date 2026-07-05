@@ -30,4 +30,10 @@ exit:
 
 watchpool:
   # 观察池容量 — v2_score 前 N 个板块进入观察池
-  top_n: 30
+  top_n: 1
+
+daily_history:
+  # AlphaSift sector_rotation 实时选股时，是否对缺失的 stock_daily 日线执行补齐
+  enabled: true
+  # 并行补齐粒度（线程数）；运行时会对缺失日线的成分股按此并发度调用 DataFetcherManager.get_daily_data
+  max_workers: 10

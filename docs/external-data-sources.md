@@ -226,8 +226,10 @@
 
 - 当前实现是**单板块内串行**处理全部成分股，不做股票级并发
 - 每只股票处理完成后固定 `sleep(0.5s)`，主要为了压低资金流/行情链路的节奏
+- AlphaSift `sector_rotation` 实时选股在 BUY 扫描前会先检查本地 `stock_daily`；若成分股缺少足够日线，会通过 `DataFetcherManager.get_daily_data` 并行补齐后再继续扫描/比价，并发度由 `strategies/rotation_entry.yaml` 的 `daily_history.max_workers` 控制
 - 因此外部源压力主要来自：
   - `legulegu` 成分股页面
+  - 缺失日线时的 `get_daily_data`
   - `get_realtime_quote`
   - `get_profit_snapshot`
   - `get_stock_capital_flow_context`

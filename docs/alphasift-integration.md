@@ -188,6 +188,7 @@ AlphaSift 侧已在 `ZhuLinsen/alphasift@377049857cc04175dc3cca62121ee41adec6cdb
 - `ALPHASIFT_ENABLED` 是“开启选股”按钮背后的持久化状态，不作为普通数据源配置项重复展示。
 - 选股页未开启时展示开启按钮；开启后读取 AlphaSift 策略列表。
 - 当前只暴露 A 股 `cn` 市场。
+- `sector_rotation` 实时选股会在 BUY 扫描前先补齐缺失的 `stock_daily` 日线；补齐调用 DSA 的 `DataFetcherManager.get_daily_data`，并发度由 `strategies/rotation_entry.yaml` 中 `daily_history.max_workers` 控制。
 - 默认返回数量为 3，避免一次选股过慢或结果过多。
 - 选股页通过后台任务提交和状态轮询获取结果；任务 ID 会保存在当前浏览器 tab 的 `sessionStorage`，切换页面后返回选股页会继续恢复进度或最终结果。后端重启或任务被清理时，前端会提示任务不可恢复并允许重新运行。
 - 结果页展示运行 ID、样本数量、过滤后数量、LLM 是否重排、LLM 覆盖率和 DSA 增强计数；如果 AlphaSift 返回 warning/source error/LLM parse error 或 `llm_ranked=false`，页面会明确显示降级原因，避免把本地因子结果误展示成正常 LLM 判断；重复的快照源 fallback warning/source error 会在前端合并展示为一条“数据源降级”提示。
