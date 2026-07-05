@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from src.repositories.plate_spi_repo import PlateSpiRepository
 from src.services.pricing_service import PricingService
 from src.services.run_diagnostics import record_custom_flow_event
+from src.services.spi.rotation_daily_history_hydrator import RotationDailyHistoryHydrator
 from src.services.spi.plate_spi_service import PlateSpiService
 from src.services.spi.rotation_service import RotationService, RotationStrategyConfig, load_rotation_strategy_config
 
@@ -28,6 +29,7 @@ class AlphaSiftSectorRotationRuntime:
         plate_repo: Optional[PlateSpiRepository] = None,
         rotation_service: Optional[RotationService] = None,
         pricing_service: Optional[PricingService] = None,
+        daily_history_hydrator: Optional[RotationDailyHistoryHydrator] = None,
         strategy_config: Optional[RotationStrategyConfig] = None,
     ) -> None:
         self._plate_service = plate_service or PlateSpiService()
@@ -38,6 +40,7 @@ class AlphaSiftSectorRotationRuntime:
             strategy_config=self._strategy_config,
         )
         self._pricing_service = pricing_service or PricingService()
+        self._daily_history_hydrator = daily_history_hydrator or RotationDailyHistoryHydrator()
 
     def run(self, *, trade_date: date, max_results: int) -> Dict[str, Any]:
         warnings: List[str] = []
@@ -84,6 +87,13 @@ class AlphaSiftSectorRotationRuntime:
                 warnings.append(f"{board_name}: constituents_missing")
                 continue
 
+            self._hydrate_daily_history(
+                board_id=board_id,
+                board_name=board_name,
+                trade_date=trade_date,
+                stock_codes=codes,
+                warnings=warnings,
+            )
             entry_results = self._scan_buy_signals(
                 board_id=board_id,
                 board_name=board_name,
@@ -239,6 +249,120 @@ class AlphaSiftSectorRotationRuntime:
             "snapshot": snapshot,
         }
 
+    def _hydrate_daily_history(
+        self,
+        *,
+        board_id: int,
+        board_name: str,
+        trade_date: date,
+        stock_codes: List[str],
+        warnings: List[str],
+    ) -> None:
+        if not self._strategy_config.daily_history_enabled:
+            return
+
+        node_id = f"rotation_daily_history_{board_id}"
+        start = time.perf_counter()
+        required_history_days = self._strategy_config.required_daily_history_days()
+        self._emit_started_stage(
+            node_id=node_id,
+            title=f"日线补齐 · {board_name}",
+            lane="data_source",
+            kind="data_source",
+            message=f"正在为 {board_name} 补齐缺失日线",
+            metadata={
+                "tradeDate": str(trade_date),
+                "boardId": board_id,
+                "boardName": board_name,
+                "codeCount": len(stock_codes),
+                "requiredHistoryDays": required_history_days,
+                "maxWorkers": self._strategy_config.daily_history_max_workers,
+            },
+            provider="daily_history",
+        )
+        summary = self._daily_history_hydrator.hydrate_codes(
+            trade_date=trade_date,
+            stock_codes=stock_codes,
+            required_history_days=required_history_days,
+            max_workers=self._strategy_config.daily_history_max_workers,
+        )
+        status = self._daily_history_status(summary.failed_count, summary.requested_count)
+        if summary.failed_count:
+            warnings.append(
+                self._build_daily_history_warning(
+                    board_name=board_name,
+                    errors=summary.errors,
+                    failed_count=summary.failed_count,
+                    requested_count=summary.requested_count,
+                )
+            )
+        self._emit_terminal_stage(
+            node_id=node_id,
+            title=f"日线补齐 · {board_name}",
+            status=status,
+            message=self._build_daily_history_message(
+                board_name=board_name,
+                requested_count=summary.requested_count,
+                hydrated_count=summary.hydrated_count,
+                satisfied_count=summary.satisfied_count,
+                failed_count=summary.failed_count,
+            ),
+            duration_ms=_duration_ms(start),
+            metadata={
+                "tradeDate": str(trade_date),
+                "boardId": board_id,
+                "boardName": board_name,
+                "codeCount": summary.total_codes,
+                "satisfiedCount": summary.satisfied_count,
+                "requestedCount": summary.requested_count,
+                "hydratedCount": summary.hydrated_count,
+                "failedCount": summary.failed_count,
+                "maxWorkers": summary.max_workers,
+                "failedCodesPreview": summary.errors[:5],
+            },
+            provider="daily_history",
+        )
+
+    @staticmethod
+    def _daily_history_status(failed_count: int, requested_count: int) -> str:
+        if requested_count == 0:
+            return "skipped"
+        if failed_count == 0:
+            return "success"
+        if failed_count < requested_count:
+            return "degraded"
+        return "failed"
+
+    @staticmethod
+    def _build_daily_history_message(
+        *,
+        board_name: str,
+        requested_count: int,
+        hydrated_count: int,
+        satisfied_count: int,
+        failed_count: int,
+    ) -> str:
+        if requested_count == 0:
+            return f"{board_name} 成分股日线已齐备，无需补齐"
+        return (
+            f"{board_name} 日线补齐完成：命中缓存 {satisfied_count} 只，"
+            f"新补齐 {hydrated_count} 只，失败 {failed_count} 只"
+        )
+
+    @staticmethod
+    def _build_daily_history_warning(
+        *,
+        board_name: str,
+        errors: List[str],
+        failed_count: int,
+        requested_count: int,
+    ) -> str:
+        preview = ", ".join(errors[:3]) if errors else "unknown"
+        return (
+            f"{board_name}: daily_history_partial: "
+            f"{failed_count}/{requested_count} failed ({preview})"
+        )
+
     def _scan_buy_signals(
         self,
         *,
@@ -323,7 +447,11 @@ class AlphaSiftSectorRotationRuntime:
             },
         )
         try:
-            result = self._pricing_service.price_board(board_id=board_id, trade_date=trade_date)
+            result = self._pricing_service.price_board(
+                board_id=board_id,
+                trade_date=trade_date,
+                codes=buy_codes,
+            )
         except Exception as exc:
             warnings.append(f"{board_name}: pricing_failed: {exc}")
             logger.warning("AlphaSift rotation pricing failed board=%s date=%s", board_id, trade_date, exc_info=True)
@@ -351,19 +479,14 @@ class AlphaSiftSectorRotationRuntime:
             ]
 
         stocks = result.get("stocks") or []
-        pricing_by_code = {
-            str(item.get("stock_code")): item
-            for item in stocks
-            if item.get("stock_code")
-        }
-        priced_matches = [pricing_by_code[code] for code in buy_codes if code in pricing_by_code]
-        priced_matches.sort(
+        # 现在 stocks 已经只包含 buy_codes，直接排序
+        stocks.sort(
             key=lambda item: float(item.get("total")) if item.get("total") is not None else -1.0,
             reverse=True,
         )
 
         board_candidates: List[Dict[str, Any]] = []
-        for rank_idx, priced in enumerate(priced_matches[:_PER_BOARD_CANDIDATE_LIMIT], start=1):
+        for rank_idx, priced in enumerate(stocks[:_PER_BOARD_CANDIDATE_LIMIT], start=1):
             stock_code = str(priced["stock_code"])
             board_candidates.append(
                 {
@@ -526,7 +649,7 @@ def _severity_for_status(status: str) -> str:
 
 
 def _lane_for_node(node_id: str) -> str:
-    if node_id.startswith("rotation_constituents_"):
+    if node_id.startswith(("rotation_constituents_", "rotation_daily_history_")):
         return "data_source"
     if node_id in {"rotation_candidates", "rotation_dsa_enrich"}:
         return "artifact"
@@ -534,7 +657,7 @@ def _lane_for_node(node_id: str) -> str:
 
 
 def _kind_for_node(node_id: str) -> str:
-    if node_id.startswith("rotation_constituents_"):
+    if node_id.startswith(("rotation_constituents_", "rotation_daily_history_")):
         return "data_source"
     if node_id in {"rotation_candidates", "rotation_dsa_enrich"}:
         return "artifact"

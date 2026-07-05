@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import time
 from datetime import date, timedelta
@@ -29,6 +30,7 @@ _BASE_W_CMF = 0.3
 _BASE_W_FLOW = 0.1
 _BASE_W_SP_NO_FLOW = 2.0 / 3.0
 _BASE_W_CMF_NO_FLOW = 1.0 / 3.0
+_STOCK_INPUT_WORKERS = 4
 
 
 def _get_fetcher_manager():
@@ -173,27 +175,89 @@ class PricingService:
         codes: List[str],
         trade_date: date,
     ) -> tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[str]]]:
-        raw_rs: List[Optional[float]] = []
-        raw_cmf: List[Optional[float]] = []
-        raw_flow: List[Optional[float]] = []
-        raw_mktcap: List[Optional[float]] = []
-        raw_profit: List[Optional[float]] = []
-        raw_profit_report_date: List[Optional[str]] = []
+        self._prefetch_realtime_quotes(manager, codes)
+        workers = min(len(codes), _STOCK_INPUT_WORKERS)
+        if workers <= 1:
+            rows = [
+                self._collect_single_stock_input(
+                    manager=manager,
+                    code=code,
+                    trade_date=trade_date,
+                )
+                for code in codes
+            ]
+        else:
+            rows = self._collect_stock_inputs_parallel(
+                manager=manager,
+                codes=codes,
+                trade_date=trade_date,
+                max_workers=workers,
+            )
+        return self._unzip_stock_inputs(rows)
 
-        for code in codes:
-            bars = _fetch_bars(code, trade_date, _CMF_WINDOW)
-            closes = [bar.close for bar in bars if bar.close is not None]
+    def _collect_stock_inputs_parallel(
+        self,
+        *,
+        manager,
+        codes: List[str],
+        trade_date: date,
+        max_workers: int,
+    ) -> List[tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[str]]]:
+        rows: List[Optional[tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[str]]]] = [None] * len(codes)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pricing-inputs") as executor:
+            futures = {
+                executor.submit(
+                    self._collect_single_stock_input,
+                    manager=manager,
+                    code=code,
+                    trade_date=trade_date,
+                ): idx
+                for idx, code in enumerate(codes)
+            }
+            for future in as_completed(futures):
+                rows[futures[future]] = future.result()
+        return [row for row in rows if row is not None]
 
-            raw_rs.append(calc_period_return(closes, period=_RS_WINDOW))
-            raw_cmf.append(calc_cmf(bars, period=_CMF_WINDOW))
-            raw_mktcap.append(self._load_market_cap(manager, code))
-            profit, report_date = self._load_profit_snapshot(manager, code)
-            raw_profit.append(profit)
-            raw_profit_report_date.append(report_date)
-            raw_flow.append(self._load_stock_capital_flow(manager, code))
-            time.sleep(0.5)
+    def _collect_single_stock_input(
+        self,
+        *,
+        manager,
+        code: str,
+        trade_date: date,
+    ) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[str]]:
+        bars = _fetch_bars(code, trade_date, _CMF_WINDOW)
+        closes = [bar.close for bar in bars if bar.close is not None]
+        profit, report_date = self._load_profit_snapshot(manager, code)
+        return (
+            calc_period_return(closes, period=_RS_WINDOW),
+            calc_cmf(bars, period=_CMF_WINDOW),
+            self._load_stock_capital_flow(manager, code),
+            self._load_market_cap(manager, code),
+            profit,
+            report_date,
+        )
 
+    @staticmethod
+    def _unzip_stock_inputs(
+        rows: List[tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[str]]],
+    ) -> tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[float]], List[Optional[str]]]:
+        raw_rs = [row[0] for row in rows]
+        raw_cmf = [row[1] for row in rows]
+        raw_flow = [row[2] for row in rows]
+        raw_mktcap = [row[3] for row in rows]
+        raw_profit = [row[4] for row in rows]
+        raw_profit_report_date = [row[5] for row in rows]
         return raw_rs, raw_cmf, raw_flow, raw_mktcap, raw_profit, raw_profit_report_date
+
+    @staticmethod
+    def _prefetch_realtime_quotes(manager, codes: List[str]) -> None:
+        prefetch = getattr(manager, "prefetch_realtime_quotes", None)
+        if not callable(prefetch):
+            return
+        try:
+            prefetch(codes)
+        except Exception:
+            logger.debug("pricing realtime prefetch failed codes=%s", len(codes), exc_info=True)
 
     @staticmethod
     def _load_market_cap(manager, code: str) -> Optional[float]:
@@ -222,13 +286,31 @@ class PricingService:
             logger.debug("stock capital flow fetch failed code=%s", code, exc_info=True)
             return None
 
-    def price_board(self, board_id: int, trade_date: date) -> Dict[str, Any]:
-        """Compute intra-board pricing scores for all constituents on trade_date.
+    def price_board(
+        self,
+        board_id: int,
+        trade_date: date,
+        codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Compute intra-board pricing scores for constituents on trade_date.
+
+        Args:
+            board_id: 板块 ID
+            trade_date: 交易日期
+            codes: 可选，指定要比价的股票列表；None 表示对板块所有成分股比价
 
         Serial execution: one constituent at a time, 0.5 s sleep per legulegu
         capital-flow fetch (rate-limit compliance).
         """
-        codes, constituent_source = self._get_constituents(board_id, trade_date)
+        if codes is not None:
+            # 使用传入的股票列表（过滤场景，如轮动 BUY 信号）
+            validated_codes = [code for code in codes if code]
+            constituent_source = "filtered"
+        else:
+            # 查询板块所有成分股
+            validated_codes, constituent_source = self._get_constituents(board_id, trade_date)
+
+        codes = validated_codes
         if not codes:
             run_id = self._repo.insert_factor_run(
                 board_id=board_id,

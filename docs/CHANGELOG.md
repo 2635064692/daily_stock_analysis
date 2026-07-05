@@ -12,11 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] `PricingService.price_board` 改为使用轻量 `profit_snapshot` / `stock_capital_flow_context` 路径，避免逐股重复调用板块级资金流排行和完整基本面聚合。
 - [文档] 提炼并补充 `PricingService.price_board` 的外部依赖链路，明确成分股、日线、实时市值、基本面利润和资金流来源及其执行特征。
 - [改进] 成分股快照新增 `origin_trade_date` / `is_stale` / `snapshot_age_days` 元数据；当前交易日默认可沿用最近 22 个交易日内的已落盘快照，并对外部成分股源增加 30 秒重拉间隔以降低 429/504。
+- [新功能] 新增 `scripts/sync_sw_constituents.py` 批量补齐申万一级板块成分股快照，默认按板块间 30 秒间隔抓取，并在 AkShare 板块清单不可用时回退到最近 `plate_spi_snapshot` 板块全集。
 - [新功能] 新增 `scripts/hydrate_spi_data.py` 同步补齐脚本，可按交易日生成 SPI v1/v2、轮动信号与板块比价数据，并输出 readiness 摘要辅助 AlphaSift `sector_rotation` 联调。
 - [新功能] AlphaSift 新增 `sector_rotation` 选股策略并支持可选 `enable_pricing_filter` 后处理，复用 SPI v2、轮动 BUY 信号与板块内比价快照。
 - [新功能] AlphaSift `sector_rotation` 升级为实时执行式板块轮动选股链，并支持在选股页/首页查看任务工作流节点详情。
+- [修复] AlphaSift `sector_rotation` 实时选股在 `stock_daily` 缺失时会先用 `DataFetcherManager.get_daily_data` 并行补齐成分股日线，再继续 BUY 扫描与板块内比价；并发度改由 `strategies/rotation_entry.yaml` 的 `daily_history.max_workers` 控制。
 - [文档] 新增 SPI phase3 从动量排序切换到缠论 S/P 比价的修正方案文档。
 - [改进] SPI phase3 比价实现改为缠论 S/P 主因子 + CMF/Flow 确认，并在板块比价 API 暴露 `sp_ratio`/`sp_score` 诊断字段。
+- [改进] `PricingService.price_board` 新增可选 `codes` 参数支持只对指定股票比价，优化 AlphaSift 板块轮动场景性能（从全板块比价降为只对 BUY 信号股票比价，减少 90%+ 无效计算）。
+- [改进] `PricingService` 数据收集改为并发执行（最多 4 个 worker），并删除 `time.sleep(0.5)` 串行限流，结合预取机制大幅提升板块比价性能。
+- [测试] 新增 `tests/test_pricing_service_concurrent.py` 覆盖并发执行逻辑、顺序保持、异常处理、性能验证和预取集成。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

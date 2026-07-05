@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from datetime import date
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -326,24 +327,6 @@ class TestBatchStatusAndRanking:
 
 
 class TestOperationalDetails:
-    def test_sleep_called_once_per_constituent(self):
-        codes = ["000001", "000002", "000003"]
-        repo = _make_repo(run_id=1)
-        c_repo = MagicMock()
-        c_repo.get_constituents.return_value = codes
-        mgr = _manager_for_codes(codes)
-        svc = _make_service(repo=repo, constituent_repo=c_repo)
-
-        with (
-            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
-            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
-            patch("src.services.pricing_service.time.sleep") as mock_sleep,
-        ):
-            svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
-
-        assert mock_sleep.call_count == len(codes)
-        mock_sleep.assert_called_with(0.5)
-
     def test_batch_save_receives_sp_fields_and_effective_weights(self):
         codes = ["000001", "000002"]
         repo = _make_repo(run_id=5)
@@ -395,3 +378,116 @@ class TestOperationalDetails:
         assert mgr.get_stock_capital_flow_context.call_count == len(codes)
         mgr.get_fundamental_context.assert_not_called()
         mgr.get_capital_flow_context.assert_not_called()
+
+    def test_price_board_prefetches_realtime_quotes_before_parallel_collection(self):
+        codes = ["000001", "000002", "000003", "000004", "000005"]
+        repo = _make_repo(run_id=12)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(codes)
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        mgr.prefetch_realtime_quotes.assert_called_once_with(codes)
+
+    def test_price_board_collects_multiple_codes_concurrently(self):
+        codes = ["000001", "000002", "000003", "000004"]
+        repo = _make_repo(run_id=13)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = codes
+        mgr = _manager_for_codes(codes)
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        active_calls = 0
+        max_active_calls = 0
+        active_lock = threading.Lock()
+
+        def _profit_side_effect(code: str):
+            nonlocal active_calls, max_active_calls
+            with active_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                threading.Event().wait(0.05)
+                return _fundamental(100.0)
+            finally:
+                with active_lock:
+                    active_calls -= 1
+
+        mgr.get_profit_snapshot.side_effect = _profit_side_effect
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+            patch("src.services.pricing_service.time.sleep"),
+        ):
+            result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        assert len(result["stocks"]) == len(codes)
+        assert max_active_calls >= 2
+
+
+class TestCodesParameterFiltering:
+    def test_price_board_with_codes_parameter_only_prices_specified_stocks(self):
+        """测试 codes 参数只对指定股票进行比价"""
+        all_codes = ["000001", "000002", "000003", "000004"]
+        filter_codes = ["000001", "000003"]
+        repo = _make_repo(run_id=10)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = all_codes
+        mgr = _manager_for_codes(filter_codes)
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+        ):
+            result = svc.price_board(
+                board_id=801010,
+                trade_date=date(2024, 6, 3),
+                codes=filter_codes,
+            )
+
+        # 验证只返回指定的股票
+        assert len(result["stocks"]) == len(filter_codes)
+        returned_codes = {item["stock_code"] for item in result["stocks"]}
+        assert returned_codes == set(filter_codes)
+
+        # 验证只调用了指定股票的数据获取
+        assert mgr.get_realtime_quote.call_count == len(filter_codes)
+        assert mgr.get_profit_snapshot.call_count == len(filter_codes)
+        assert mgr.get_stock_capital_flow_context.call_count == len(filter_codes)
+
+        # 验证 constituent_source 标记为 filtered
+        call_kw = repo.save_pricing_batch.call_args.kwargs
+        assert call_kw["constituent_source"] == "filtered"
+        assert call_kw["constituent_count"] == len(filter_codes)
+
+    def test_price_board_without_codes_parameter_prices_all_constituents(self):
+        """测试不传 codes 参数时对板块所有成分股比价"""
+        all_codes = ["000001", "000002", "000003"]
+        repo = _make_repo(run_id=11)
+        c_repo = MagicMock()
+        c_repo.get_constituents.return_value = all_codes
+        mgr = _manager_for_codes(all_codes)
+        svc = _make_service(repo=repo, constituent_repo=c_repo)
+
+        with (
+            patch("src.services.pricing_service._fetch_bars", return_value=_make_bars()),
+            patch("src.services.pricing_service._get_fetcher_manager", return_value=mgr),
+        ):
+            result = svc.price_board(board_id=801010, trade_date=date(2024, 6, 3))
+
+        # 验证返回所有成分股
+        assert len(result["stocks"]) == len(all_codes)
+        returned_codes = {item["stock_code"] for item in result["stocks"]}
+        assert returned_codes == set(all_codes)
+
+        # 验证调用了 get_constituents
+        c_repo.get_constituents.assert_called_once_with(801010, date(2024, 6, 3))

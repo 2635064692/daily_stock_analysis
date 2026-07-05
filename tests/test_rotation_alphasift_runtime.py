@@ -17,6 +17,7 @@ def test_runtime_builds_candidates_from_realtime_chain():
     plate_repo = MagicMock()
     rotation_service = MagicMock()
     pricing_service = MagicMock()
+    daily_history_hydrator = MagicMock()
 
     plate_repo.find_top_boards_v2.return_value = [
         {"board_id": 801010, "board_name": "农林牧渔", "v2_score": 88.0},
@@ -34,7 +35,7 @@ def test_runtime_builds_candidates_from_realtime_chain():
         "run_id": 7,
         "flow_coverage": 0.8,
         "status": "ok",
-        "priced_count": 2,
+        "priced_count": 1,
         "stocks": [
             {
                 "stock_code": "600519",
@@ -46,25 +47,25 @@ def test_runtime_builds_candidates_from_realtime_chain():
                 "flow_score": 0.66,
                 "factor_mask": "sp,cmf,flow",
             },
-            {
-                "stock_code": "000858",
-                "status": "ok",
-                "total": 0.66,
-                "sp_ratio": 0.62,
-                "sp_score": 0.70,
-                "cmf": 0.05,
-                "flow_score": 0.44,
-                "factor_mask": "sp,cmf,flow",
-            },
         ],
     }
+    daily_history_hydrator.hydrate_codes.return_value = MagicMock(
+        total_codes=2,
+        satisfied_count=1,
+        requested_count=1,
+        hydrated_count=1,
+        failed_count=0,
+        max_workers=3,
+        errors=[],
+    )
 
     runtime = AlphaSiftSectorRotationRuntime(
         plate_service=plate_service,
         plate_repo=plate_repo,
         rotation_service=rotation_service,
         pricing_service=pricing_service,
-        strategy_config=RotationStrategyConfig(watchpool_top_n=1),
+        daily_history_hydrator=daily_history_hydrator,
+        strategy_config=RotationStrategyConfig(watchpool_top_n=1, daily_history_max_workers=3),
     )
 
     result = runtime.run(trade_date=TRADE_DATE, max_results=5)
@@ -72,8 +73,18 @@ def test_runtime_builds_candidates_from_realtime_chain():
     plate_service.refresh_all_v2.assert_not_called()
     plate_repo.find_top_boards_v2.assert_called_once_with(anchor_date=TRADE_DATE, top_n=1)
     rotation_service.resolve_constituents.assert_called_once_with(801010, TRADE_DATE)
+    daily_history_hydrator.hydrate_codes.assert_called_once_with(
+        trade_date=TRADE_DATE,
+        stock_codes=["600519", "000858"],
+        required_history_days=30,
+        max_workers=3,
+    )
     rotation_service.scan_entry_signals.assert_called_once()
-    pricing_service.price_board.assert_called_once_with(board_id=801010, trade_date=TRADE_DATE)
+    pricing_service.price_board.assert_called_once_with(
+        board_id=801010,
+        trade_date=TRADE_DATE,
+        codes=["600519"],
+    )
 
     assert result["rotation_boards"] == 1
     assert result["snapshot_source"] == "spi_v2:realtime_rotation_runtime"
@@ -89,6 +100,7 @@ def test_runtime_refreshes_v2_watchpool_when_snapshot_insufficient():
     plate_repo = MagicMock()
     rotation_service = MagicMock()
     pricing_service = MagicMock()
+    daily_history_hydrator = MagicMock()
 
     plate_repo.find_top_boards_v2.side_effect = [
         [{"board_id": 801010, "board_name": "农林牧渔", "v2_score": 88.0}],
@@ -104,12 +116,14 @@ def test_runtime_refreshes_v2_watchpool_when_snapshot_insufficient():
         plate_repo=plate_repo,
         rotation_service=rotation_service,
         pricing_service=pricing_service,
+        daily_history_hydrator=daily_history_hydrator,
         strategy_config=RotationStrategyConfig(watchpool_top_n=2),
     )
 
     result = runtime.run(trade_date=TRADE_DATE, max_results=5)
 
     plate_service.refresh_all_v2.assert_called_once_with(anchor_date=TRADE_DATE)
+    daily_history_hydrator.hydrate_codes.assert_not_called()
     assert result["rotation_boards"] == 0
     assert "constituents_missing" in result["warnings"][0]
 
@@ -129,6 +143,7 @@ def test_runtime_emits_flow_events_for_each_stage():
         plate_repo = MagicMock()
         rotation_service = MagicMock()
         pricing_service = MagicMock()
+        daily_history_hydrator = MagicMock()
 
         plate_repo.find_top_boards_v2.return_value = [
             {"board_id": 801010, "board_name": "农林牧渔", "v2_score": 91.0},
@@ -159,13 +174,23 @@ def test_runtime_emits_flow_events_for_each_stage():
                 }
             ],
         }
+        daily_history_hydrator.hydrate_codes.return_value = MagicMock(
+            total_codes=1,
+            satisfied_count=0,
+            requested_count=1,
+            hydrated_count=1,
+            failed_count=0,
+            max_workers=2,
+            errors=[],
+        )
 
         runtime = AlphaSiftSectorRotationRuntime(
             plate_service=plate_service,
             plate_repo=plate_repo,
             rotation_service=rotation_service,
             pricing_service=pricing_service,
-            strategy_config=RotationStrategyConfig(watchpool_top_n=5),
+            daily_history_hydrator=daily_history_hydrator,
+            strategy_config=RotationStrategyConfig(watchpool_top_n=5, daily_history_max_workers=2),
         )
 
         runtime.run(trade_date=TRADE_DATE, max_results=3)
@@ -177,6 +202,8 @@ def test_runtime_emits_flow_events_for_each_stage():
     assert "rotation_watchpool_completed" in event_types
     assert "rotation_constituents_801010_started" in event_types
     assert "rotation_constituents_801010_completed" in event_types
+    assert "rotation_daily_history_801010_started" in event_types
+    assert "rotation_daily_history_801010_completed" in event_types
     assert "rotation_entry_801010_started" in event_types
     assert "rotation_entry_801010_completed" in event_types
     assert "rotation_pricing_801010_started" in event_types
