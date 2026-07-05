@@ -1,0 +1,15 @@
+{
+  "id": "alphasift-sector-rotation-runtime-data-readiness",
+  "title": "AlphaSift sector_rotation 运行期数据就绪与提交归档",
+  "status": "completed",
+  "strategy": "single-agent",
+  "complexity": "medium",
+  "risk": "medium",
+  "currentPhase": "6-validation",
+  "taskPhase": "done",
+  "nextAction": "功能改动已以 3bf846b 提交；AGENTS 根目录命令约束与 .ccg 归档一并落盘，定向 py_compile / pytest / ai-assets 校验已通过。",
+  "gate": "passed",
+  "branch": "docs/grok-search-and-alphasift",
+  "scope": "alphasift-sector-rotation-runtime-data-readiness",
+  "createdAt": "2026-07-05T00:00:00+08:00"
+}
