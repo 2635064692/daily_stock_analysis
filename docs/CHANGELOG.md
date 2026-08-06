@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] `PricingService.price_board` 新增可选 `codes` 参数支持只对指定股票比价，优化 AlphaSift 板块轮动场景性能（从全板块比价降为只对 BUY 信号股票比价，减少 90%+ 无效计算）。
 - [改进] `PricingService` 数据收集改为并发执行（最多 4 个 worker），并删除 `time.sleep(0.5)` 串行限流，结合预取机制大幅提升板块比价性能。
 - [测试] 新增 `tests/test_pricing_service_concurrent.py` 覆盖并发执行逻辑、顺序保持、异常处理、性能验证和预取集成。
+- [修复] Web 选股页兼容 `sector_rotation` 运行时候选契约，不再因候选缺少 `raw/reason/rank` 等 AlphaSift 通用字段而触发整页加载失败。
+- [修复] `strategies/rotation_entry.yaml` 补 `instructions` 字段，使其能作为 skill 正常加载（此前缺字段被 skill 加载器跳过，仅作为参数配置生效）。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

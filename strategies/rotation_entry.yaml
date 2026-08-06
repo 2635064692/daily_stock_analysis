@@ -14,6 +14,31 @@ default_active: true
 default_priority: 5
 market_regimes: [trending_up, ranging]
 
+instructions: |
+  **板块轮动入场与出场**
+
+  本策略用于 SPI v2 板块轮动系统的入场、出场与观察池管理。
+
+  判断标准：
+
+  1. **入场（Entry）**
+     - 成分股收盘价回踩至 EMA20（`entry.ema_period`）附近视为支撑位，容忍度为 `entry.pullback_tolerance`。
+     - 量比大于 `entry.volume_ratio_threshold` 视为有效放量确认，才触发板块轮动 BUY 信号。
+
+  2. **出场（Exit）**
+     - 板块 SPI v2 排名跌出 Top `exit.top_m` 时，触发板块级出场信号。
+     - 个股跌破 EMA `exit.ema_period` 时，触发个股级出场信号。
+
+  3. **观察池（Watchpool）**
+     - SPI v2 评分前 `watchpool.top_n` 的板块进入观察池。
+
+  4. **日线补齐（Daily History）**
+     - AlphaSift `sector_rotation` 实时选股时，若 `stock_daily` 缺失则先并行补齐成分股日线，并发度由 `daily_history.max_workers` 控制。
+
+  数据依赖：
+  - `spi_calculator`：计算板块 SPI 评分与排名。
+  - `constituents_snapshot`：获取板块成分股快照。
+
 entry:
   # 回踩均线周期（日），成分股收盘价回踩至此均线视为支撑位
   ema_period: 20
