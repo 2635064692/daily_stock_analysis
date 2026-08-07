@@ -167,6 +167,17 @@ class AlphaSiftSectorRotationRuntime:
             )
             source = "snapshot"
             if len(boards) < self._strategy_config.watchpool_top_n:
+                # v2 scores are backfilled onto existing snapshot rows (UPDATE),
+                # so the day's base rows must exist first. refresh_all() creates
+                # them; refresh_all_v2() only fills v2_score onto them.
+                try:
+                    self._plate_service.refresh_all(anchor_date=trade_date)
+                except Exception:
+                    logger.warning(
+                        "rotation snapshot creation failed date=%s",
+                        trade_date,
+                        exc_info=True,
+                    )
                 self._plate_service.refresh_all_v2(anchor_date=trade_date)
                 boards = self._plate_repo.find_top_boards_v2(
                     anchor_date=trade_date,

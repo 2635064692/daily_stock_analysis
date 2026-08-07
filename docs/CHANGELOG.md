@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 新增 `tests/test_pricing_service_concurrent.py` 覆盖并发执行逻辑、顺序保持、异常处理、性能验证和预取集成。
 - [修复] Web 选股页兼容 `sector_rotation` 运行时候选契约，不再因候选缺少 `raw/reason/rank` 等 AlphaSift 通用字段而触发整页加载失败。
 - [修复] `strategies/rotation_entry.yaml` 补 `instructions` 字段，使其能作为 skill 正常加载（此前缺字段被 skill 加载器跳过，仅作为参数配置生效）。
+- [修复] AlphaSift `sector_rotation` 选股当日无 v2 快照时，先调用 `refresh_all` 创建当日快照行再回填 v2 分数，修复因 v2 仅回填已存在行导致当日刷新落空而误报「无可用v2板块」的问题。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

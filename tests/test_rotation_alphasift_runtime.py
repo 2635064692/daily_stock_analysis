@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from src.services.run_diagnostics import activate_run_diagnostic_context, reset_run_diagnostic_context
 from src.services.spi.rotation_alphasift_runtime import AlphaSiftSectorRotationRuntime
@@ -122,6 +122,11 @@ def test_runtime_refreshes_v2_watchpool_when_snapshot_insufficient():
 
     result = runtime.run(trade_date=TRADE_DATE, max_results=5)
 
+    # Snapshot rows must exist before v2 scores are backfilled: refresh_all
+    # creates the day's base rows, refresh_all_v2 only fills v2_score onto them.
+    assert plate_service.refresh_all.call_args_list == [
+        call(anchor_date=TRADE_DATE),
+    ]
     plate_service.refresh_all_v2.assert_called_once_with(anchor_date=TRADE_DATE)
     daily_history_hydrator.hydrate_codes.assert_not_called()
     assert result["rotation_boards"] == 0
