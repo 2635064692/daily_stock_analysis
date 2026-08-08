@@ -205,24 +205,7 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]["股票代码"], "002043")
 
-    def test_stock_capital_flow_omits_sector_rankings_query(self) -> None:
-        adapter = AkshareFundamentalAdapter()
-        stock_df = pd.DataFrame(
-            {
-                "股票代码": ["600519"],
-                "主力净流入": [123.0],
-                "5日净流入": [200.0],
-                "10日净流入": [300.0],
-            }
-        )
-        with patch.object(adapter, "_call_df_candidates", return_value=(stock_df, "stock_individual_fund_flow", [])) as call_mock:
-            result = adapter.get_stock_capital_flow("600519")
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["stock_flow"]["main_net_inflow"], 123.0)
-        self.assertEqual(call_mock.call_count, 1)
-
-    def test_stock_capital_flow_falls_back_to_datacenter_when_push2his_fails(self) -> None:
+    def test_stock_capital_flow_prefers_datacenter_when_push2his_blocked(self) -> None:
         adapter = AkshareFundamentalAdapter()
         dc_df = pd.DataFrame(
             {
@@ -231,16 +214,39 @@ class TestFundamentalAdapter(unittest.TestCase):
                 "5日净流入": [0.17],
             }
         )
+        # datacenter-first: when datacenter succeeds, push2his (_call_df_candidates)
+        # must NOT be invoked.
         with patch.object(
-            adapter, "_call_df_candidates", return_value=(None, None, ["mock_fail"])
-        ), patch.object(
             adapter, "_fetch_datacenter_capital_flow", return_value=(dc_df, "datacenter:RPT_DMSK_TS_STOCKNEW", [])
-        ):
+        ), patch.object(
+            adapter, "_call_df_candidates", return_value=(None, None, ["unexpected_push2his_call"])
+        ) as call_mock:
             result = adapter.get_stock_capital_flow("002043")
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["stock_flow"]["main_net_inflow"], -10206248.0)
         self.assertEqual(result["source_chain"], ["capital_stock:datacenter:RPT_DMSK_TS_STOCKNEW"])
+        call_mock.assert_not_called()
+
+    def test_stock_capital_flow_falls_back_to_push2his_when_datacenter_misses(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        stock_df = pd.DataFrame(
+            {
+                "股票代码": ["600519"],
+                "主力净流入": [123.0],
+                "5日净流入": [200.0],
+            }
+        )
+        with patch.object(
+            adapter, "_fetch_datacenter_capital_flow", return_value=(None, None, ["dc_miss"])
+        ), patch.object(
+            adapter, "_call_df_candidates", return_value=(stock_df, "stock_individual_fund_flow", [])
+        ):
+            result = adapter.get_stock_capital_flow("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["stock_flow"]["main_net_inflow"], 123.0)
+        self.assertEqual(result["source_chain"], ["capital_stock:stock_individual_fund_flow"])
 
     def test_fetch_datacenter_capital_flow_builds_expected_df(self) -> None:
         adapter = AkshareFundamentalAdapter()

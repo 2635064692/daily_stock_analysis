@@ -327,6 +327,7 @@ class AkshareFundamentalAdapter:
     def _call_df_candidates(
         self,
         candidates: List[Tuple[str, Dict[str, Any]]],
+        call_timeout: float = 3.0,
     ) -> Tuple[Optional[pd.DataFrame], Optional[str], List[str]]:
         errors: List[str] = []
         try:
@@ -339,7 +340,17 @@ class AkshareFundamentalAdapter:
             if fn is None:
                 continue
             try:
-                df = fn(**kwargs)
+                if call_timeout > 0:
+                    ex = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = ex.submit(fn, **kwargs)
+                        df = future.result(timeout=call_timeout)
+                    finally:
+                        # Shutdown without waiting: a timed-out request may
+                        # still be running and blocking shutdown() indefinitely.
+                        ex.shutdown(wait=False, cancel_futures=True)
+                else:
+                    df = fn(**kwargs)
                 if isinstance(df, pd.Series):
                     df = df.to_frame().T
                 if isinstance(df, pd.DataFrame) and not df.empty:
@@ -373,9 +384,12 @@ class AkshareFundamentalAdapter:
         for period in periods or _recent_report_periods():
             df = None
             try:
-                with ThreadPoolExecutor(max_workers=1) as ex:
+                ex = ThreadPoolExecutor(max_workers=1)
+                try:
                     future = ex.submit(fn, **{period_param: period})
                     df = future.result(timeout=fetch_timeout)
+                finally:
+                    ex.shutdown(wait=False, cancel_futures=True)
                 if isinstance(df, pd.Series):
                     df = df.to_frame().T
                 if isinstance(df, pd.DataFrame) and not df.empty:
@@ -645,19 +659,20 @@ class AkshareFundamentalAdapter:
             "errors": [],
         }
 
-        stock_df, stock_source, stock_errors = self._call_df_candidates([
-            ("stock_individual_fund_flow", {"stock": stock_code}),
-            ("stock_individual_fund_flow", {"symbol": stock_code}),
-            ("stock_individual_fund_flow", {}),
-            ("stock_main_fund_flow", {"symbol": stock_code}),
-            ("stock_main_fund_flow", {}),
-        ])
-        result["errors"].extend(stock_errors)
+        # datacenter-web first: on exit IPs where push2his is WAF-blocked it is
+        # the reliable path and returns in one request; push2his retries several
+        # failing endpoints serially which blows the stage budget.
+        stock_df, stock_source, dc_errors = self._fetch_datacenter_capital_flow(stock_code)
+        result["errors"].extend(dc_errors)
         if stock_df is None:
-            # Fallback: push2his is sometimes WAF-blocked on the exit IP;
-            # datacenter-web uses a different host that stays reachable.
-            stock_df, stock_source, dc_errors = self._fetch_datacenter_capital_flow(stock_code)
-            result["errors"].extend(dc_errors)
+            stock_df, stock_source, stock_errors = self._call_df_candidates([
+                ("stock_individual_fund_flow", {"stock": stock_code}),
+                ("stock_individual_fund_flow", {"symbol": stock_code}),
+                ("stock_individual_fund_flow", {}),
+                ("stock_main_fund_flow", {"symbol": stock_code}),
+                ("stock_main_fund_flow", {}),
+            ])
+            result["errors"].extend(stock_errors)
         if stock_df is None:
             return result
 
@@ -690,7 +705,7 @@ class AkshareFundamentalAdapter:
         sector_df, sector_source, sector_errors = self._call_df_candidates([
             ("stock_sector_fund_flow_rank", {}),
             ("stock_sector_fund_flow_summary", {}),
-        ])
+        ], call_timeout=0.5)
         result["errors"].extend(sector_errors)
         if sector_df is None:
             return result
