@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -168,7 +169,7 @@ def _normalize_report_date(value: Any) -> Optional[str]:
     return parsed.date().isoformat() if parsed else None
 
 
-def _recent_report_periods(count: int = 4) -> List[str]:
+def _recent_report_periods(count: int = 1) -> List[str]:
     """Return recent quarter-end report periods as akshare date strings (YYYYMMDD).
 
     AkShare earnings-forecast endpoints (stock_yjyg_em / stock_yjkb_em) accept a
@@ -354,12 +355,15 @@ class AkshareFundamentalAdapter:
         stock_code: str,
         period_param: str = "date",
         periods: Optional[List[str]] = None,
+        fetch_timeout: float = 3.0,
     ) -> Tuple[Optional[pd.DataFrame], Optional[str], List[str]]:
         """Fetch a batch endpoint (keyed by report period, not symbol) and filter.
 
         AkShare endpoints like stock_yjyg_em / stock_yjkb_em take a report-period
-        date and return ALL companies for that period. Probe several recent
-        periods and return the first one containing the target symbol.
+        date and return ALL companies for that period. Probe recent periods and
+        return the first one containing the target symbol. Each period call is
+        bounded by ``fetch_timeout`` so a slow batch never stalls the whole
+        fundamental bundle (which runs under a tight stage timeout).
         """
         import akshare as ak
         fn = getattr(ak, func_name, None)
@@ -367,8 +371,11 @@ class AkshareFundamentalAdapter:
             return None, None, [f"{func_name}:not_found"]
         errors: List[str] = []
         for period in periods or _recent_report_periods():
+            df = None
             try:
-                df = fn(**{period_param: period})
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(fn, **{period_param: period})
+                    df = future.result(timeout=fetch_timeout)
                 if isinstance(df, pd.Series):
                     df = df.to_frame().T
                 if isinstance(df, pd.DataFrame) and not df.empty:
