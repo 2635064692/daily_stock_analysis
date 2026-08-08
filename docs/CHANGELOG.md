@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `strategies/rotation_entry.yaml` 补 `instructions` 字段，使其能作为 skill 正常加载（此前缺字段被 skill 加载器跳过，仅作为参数配置生效）。
 - [修复] AlphaSift `sector_rotation` 选股当日无 v2 快照时，先调用 `refresh_all` 创建当日快照行再回填 v2 分数，修复因 v2 仅回填已存在行导致当日刷新落空而误报「无可用v2板块」的问题。
 - [修复] 修复 `data_provider/fundamental_adapter.py` 与 akshare 1.18.64 接口兼容性：股票代码入参统一归一化（去 `.SZ/.SH` 后缀），`stock_yjyg_em`/`stock_yjkb_em` 改为按报告期批量拉取后按代码过滤，并适配 `stock_financial_abstract` 竖排指标布局，修复基本面财务数据（`financial_report`/`belong_boards`）获取不全的问题。
+- [修复] 个股资金流在 `push2his.eastmoney.com` 被 WAF 封锁的出口 IP 环境下，自动降级到 `datacenter-web.eastmoney.com` 的 `RPT_DMSK_TS_STOCKNEW` 报表接口，保证资金流数据仍可获取。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

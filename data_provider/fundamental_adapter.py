@@ -387,6 +387,69 @@ class AkshareFundamentalAdapter:
                 continue
         return None, None, errors
 
+    def _fetch_datacenter_capital_flow(
+        self,
+        stock_code: str,
+        timeout: float = 5.0,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str], List[str]]:
+        """Fetch stock capital flow from datacenter-web (eastmoney) as fallback.
+
+        `stock_individual_fund_flow` hits push2his.eastmoney.com which is
+        sometimes WAF-blocked on specific exit IPs. datacenter-web uses a
+        different host and the RPT_DMSK_TS_STOCKNEW report carries the same
+        money-flow fields, so we query it directly and reshape into the
+        columns the existing parser expects (主力净流入 etc.).
+        """
+        import requests
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params = {
+            "reportName": "RPT_DMSK_TS_STOCKNEW",
+            "columns": "ALL",
+            "filter": f'(SECURITY_CODE="{stock_code}")',
+            "pageNumber": "1",
+            "pageSize": "5",
+            "sortTypes": "-1",
+            "sortColumns": "TRADE_DATE",
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36"}
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            return None, None, [f"datacenter_capital_flow:{type(exc).__name__}"]
+
+        rows = (payload.get("result") or {}).get("data") or []
+        if not rows:
+            return None, None, ["datacenter_capital_flow:empty"]
+
+        norm = _normalize_code(stock_code)
+        matched = [r for r in rows if str(r.get("SECURITY_CODE", "")).zfill(6) == norm.zfill(6)]
+        if not matched:
+            return None, None, ["datacenter_capital_flow:code_not_found"]
+
+        rec = matched[0]
+
+        def _as_float(val):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        # 主力净流入 = 超大单净流入 - 超大单净流出 (net of super-large orders).
+        super_in = _as_float(rec.get("SUPERDEAL_INFLOW"))
+        super_out = _as_float(rec.get("SUPERDEAL_OUTFLOW"))
+        main_net = (super_in - super_out) if (super_in is not None and super_out is not None) else None
+        df = pd.DataFrame(
+            [{
+                "股票代码": norm,
+                "主力净流入": main_net,
+                "5日净流入": _as_float(rec.get("RATIO_3DAYS")),
+                "主力净流入-净占比": _as_float(rec.get("RATIO")),
+            }]
+        )
+        return df, "datacenter:RPT_DMSK_TS_STOCKNEW", []
+
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
         Return normalized fundamental blocks from AkShare with partial tolerance.
@@ -590,6 +653,11 @@ class AkshareFundamentalAdapter:
             ("stock_main_fund_flow", {}),
         ])
         result["errors"].extend(stock_errors)
+        if stock_df is None:
+            # Fallback: push2his is sometimes WAF-blocked on the exit IP;
+            # datacenter-web uses a different host that stays reachable.
+            stock_df, stock_source, dc_errors = self._fetch_datacenter_capital_flow(stock_code)
+            result["errors"].extend(dc_errors)
         if stock_df is None:
             return result
 

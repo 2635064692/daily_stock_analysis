@@ -222,6 +222,50 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(result["stock_flow"]["main_net_inflow"], 123.0)
         self.assertEqual(call_mock.call_count, 1)
 
+    def test_stock_capital_flow_falls_back_to_datacenter_when_push2his_fails(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        dc_df = pd.DataFrame(
+            {
+                "股票代码": ["002043"],
+                "主力净流入": [-10206248.0],
+                "5日净流入": [0.17],
+            }
+        )
+        with patch.object(
+            adapter, "_call_df_candidates", return_value=(None, None, ["mock_fail"])
+        ), patch.object(
+            adapter, "_fetch_datacenter_capital_flow", return_value=(dc_df, "datacenter:RPT_DMSK_TS_STOCKNEW", [])
+        ):
+            result = adapter.get_stock_capital_flow("002043")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["stock_flow"]["main_net_inflow"], -10206248.0)
+        self.assertEqual(result["source_chain"], ["capital_stock:datacenter:RPT_DMSK_TS_STOCKNEW"])
+
+    def test_fetch_datacenter_capital_flow_builds_expected_df(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        import types
+        fake_resp = types.SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "result": {"data": [
+                    {
+                        "SECURITY_CODE": "002043",
+                        "SUPERDEAL_INFLOW": 5854680.0,
+                        "SUPERDEAL_OUTFLOW": 16060928.0,
+                        "RATIO_3DAYS": 0.171866666667,
+                        "RATIO": 0.2863,
+                    }
+                ]}
+            },
+        )
+        with patch("requests.get", return_value=fake_resp) as get_mock:
+            df, source, errors = adapter._fetch_datacenter_capital_flow("002043.SZ")
+        self.assertEqual(source, "datacenter:RPT_DMSK_TS_STOCKNEW")
+        self.assertEqual(errors, [])
+        self.assertEqual(df.iloc[0]["主力净流入"], 5854680.0 - 16060928.0)
+        self.assertEqual(get_mock.call_count, 1)
+
     def test_build_dividend_payload_returns_empty_when_code_not_matched(self) -> None:
         now = datetime.now().strftime("%Y-%m-%d")
         df = pd.DataFrame(
