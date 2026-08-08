@@ -91,14 +91,17 @@ def _normalize_code(raw: Any) -> str:
     return s
 
 
-def _pick_by_keywords(row: pd.Series, keywords: List[str]) -> Optional[Any]:
+def _pick_by_keywords(row: Any, keywords: List[str]) -> Optional[Any]:
     """
     Return first non-empty row value whose column name contains any keyword.
+
+    Accepts both pd.Series (row from a DataFrame) and dict (metric maps).
     """
-    for col in row.index:
+    keys = row.index if hasattr(row, "index") else row.keys()
+    for col in keys:
         col_s = str(col)
         if any(k in col_s for k in keywords):
-            val = row.get(col)
+            val = row.get(col) if hasattr(row, "get") else row[col]
             if val is not None and str(val).strip() not in ("", "-", "nan", "None"):
                 return val
     return None
@@ -163,6 +166,29 @@ def _filter_rows_by_code(df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
 def _normalize_report_date(value: Any) -> Optional[str]:
     parsed = _safe_datetime(value)
     return parsed.date().isoformat() if parsed else None
+
+
+def _recent_report_periods(count: int = 4) -> List[str]:
+    """Return recent quarter-end report periods as akshare date strings (YYYYMMDD).
+
+    AkShare earnings-forecast endpoints (stock_yjyg_em / stock_yjkb_em) accept a
+    report-period date (e.g. 20260331) and return ALL listed companies for that
+    period; there is no per-symbol query. We probe several recent periods so a
+    symbol that filed in an earlier quarter is still found.
+    """
+    now = datetime.now()
+    periods: List[str] = []
+    year, quarter = now.year, (now.month - 1) // 3 + 1
+    # Quarter-end day differs: Q1 0331, Q2 0630, Q3 0930, Q4 1231.
+    _QUARTER_END_DAY = {1: 31, 2: 30, 3: 30, 4: 31}
+    for _ in range(max(1, count)):
+        month_end = quarter * 3
+        periods.append(f"{year}{month_end:02d}{_QUARTER_END_DAY[quarter]:02d}")
+        quarter -= 1
+        if quarter < 1:
+            quarter = 4
+            year -= 1
+    return periods
 
 
 def _build_dividend_payload(
@@ -261,6 +287,39 @@ def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series
     return df.iloc[0]
 
 
+def _extract_financial_metrics(df: pd.DataFrame) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Extract (metrics, latest_period) from AkShare's vertical layout.
+
+    `stock_financial_abstract` returns one row per indicator (归母净利润,
+    毛利率, ...) with report-period dates as columns. Flip it into a
+    name -> latest value map so callers can _pick_by_keywords on indicator
+    names. latest_period is the newest report-period column (e.g. 20260331).
+    Returns (None, None) for non-vertical layouts (horizontal, per-symbol).
+    """
+    if df is None or df.empty:
+        return None, None
+    if "指标" not in df.columns:
+        return None, None
+    code_cols = [c for c in df.columns if any(k in str(c) for k in ("代码", "股票代码", "证券代码", "ts_code", "symbol"))]
+    if code_cols:
+        return None, None
+    # Pick the most recent report-period column (highest date string).
+    period_cols = [
+        c for c in df.columns
+        if isinstance(c, str) and len(c) == 8 and c.isdigit()
+    ]
+    if not period_cols:
+        return None, None
+    latest = max(period_cols)
+    metrics: Dict[str, Any] = {}
+    for _, row in df.iterrows():
+        name = _safe_str(row.get("指标"))
+        if not name:
+            continue
+        metrics[name] = row.get(latest)
+    return metrics, latest
+
+
 class AkshareFundamentalAdapter:
     """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
 
@@ -289,10 +348,45 @@ class AkshareFundamentalAdapter:
                 continue
         return None, None, errors
 
+    def _fetch_batch_and_filter(
+        self,
+        func_name: str,
+        stock_code: str,
+        period_param: str = "date",
+        periods: Optional[List[str]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str], List[str]]:
+        """Fetch a batch endpoint (keyed by report period, not symbol) and filter.
+
+        AkShare endpoints like stock_yjyg_em / stock_yjkb_em take a report-period
+        date and return ALL companies for that period. Probe several recent
+        periods and return the first one containing the target symbol.
+        """
+        import akshare as ak
+        fn = getattr(ak, func_name, None)
+        if fn is None:
+            return None, None, [f"{func_name}:not_found"]
+        errors: List[str] = []
+        for period in periods or _recent_report_periods():
+            try:
+                df = fn(**{period_param: period})
+                if isinstance(df, pd.Series):
+                    df = df.to_frame().T
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    filtered = _filter_rows_by_code(df, stock_code)
+                    if not filtered.empty:
+                        return filtered, func_name, errors
+            except Exception as exc:
+                errors.append(f"{func_name}:{type(exc).__name__}")
+                continue
+        return None, None, errors
+
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
         Return normalized fundamental blocks from AkShare with partial tolerance.
         """
+        # AkShare endpoints expect plain codes (002043) not suffixed variants
+        # (002043.SZ / SZ002043); normalize before passing as query params.
+        stock_code = _normalize_code(stock_code)
         result: Dict[str, Any] = {
             "status": "not_supported",
             "growth": {},
@@ -310,18 +404,32 @@ class AkshareFundamentalAdapter:
         ])
         result["errors"].extend(fin_errors)
         if fin_df is not None:
-            row = _extract_latest_row(fin_df, stock_code)
-            if row is not None:
-                revenue_yoy = _safe_float(_pick_by_keywords(row, ["营业收入同比", "营收同比", "收入同比", "同比增长"]))
-                profit_yoy = _safe_float(_pick_by_keywords(row, ["净利润同比", "净利同比", "归母净利润同比"]))
-                roe = _safe_float(_pick_by_keywords(row, ["净资产收益率", "ROE", "净资产收益"]))
-                gross_margin = _safe_float(_pick_by_keywords(row, ["毛利率"]))
-                report_date = _normalize_report_date(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["report_date"]))
-                revenue = _safe_float(_pick_by_keywords(row, ["营业总收入", "营业收入", "营收"]))
-                net_profit_parent = _safe_float(_pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"]))
+            metrics, latest_period = _extract_financial_metrics(fin_df)
+            if metrics is not None:
+                revenue_yoy = _safe_float(_pick_by_keywords(metrics, ["营业收入同比", "营收同比", "收入同比", "同比增长"]))
+                profit_yoy = _safe_float(_pick_by_keywords(metrics, ["净利润同比", "净利同比", "归母净利润同比"]))
+                roe = _safe_float(_pick_by_keywords(metrics, ["净资产收益率", "ROE", "净资产收益"]))
+                gross_margin = _safe_float(_pick_by_keywords(metrics, ["毛利率"]))
+                report_date = _normalize_report_date(latest_period)
+                revenue = _safe_float(_pick_by_keywords(metrics, ["营业总收入", "营业收入", "营收"]))
+                net_profit_parent = _safe_float(_pick_by_keywords(metrics, ["归母净利润", "母公司股东净利润", "净利润"]))
+                operating_cash_flow = _safe_float(
+                    _pick_by_keywords(metrics, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])
+                )
+            else:
+                # Fallback: horizontal per-symbol layout (row = one stock).
+                row = _extract_latest_row(fin_df, stock_code)
+                revenue_yoy = _safe_float(_pick_by_keywords(row, ["营业收入同比", "营收同比", "收入同比", "同比增长"])) if row is not None else None
+                profit_yoy = _safe_float(_pick_by_keywords(row, ["净利润同比", "净利同比", "归母净利润同比"])) if row is not None else None
+                roe = _safe_float(_pick_by_keywords(row, ["净资产收益率", "ROE", "净资产收益"])) if row is not None else None
+                gross_margin = _safe_float(_pick_by_keywords(row, ["毛利率"])) if row is not None else None
+                report_date = _normalize_report_date(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["report_date"])) if row is not None else None
+                revenue = _safe_float(_pick_by_keywords(row, ["营业总收入", "营业收入", "营收"])) if row is not None else None
+                net_profit_parent = _safe_float(_pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"])) if row is not None else None
                 operating_cash_flow = _safe_float(
                     _pick_by_keywords(row, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])
-                )
+                ) if row is not None else None
+            if any(v is not None for v in (revenue_yoy, profit_yoy, roe, gross_margin, revenue, net_profit_parent, operating_cash_flow)):
                 result["growth"] = {
                     "revenue_yoy": revenue_yoy,
                     "net_profit_yoy": profit_yoy,
@@ -339,13 +447,11 @@ class AkshareFundamentalAdapter:
                     result["earnings"]["financial_report"] = financial_report_payload
                 result["source_chain"].append(f"growth:{fin_source}")
 
-        # Earnings forecast
-        forecast_df, forecast_source, forecast_errors = self._call_df_candidates([
-            ("stock_yjyg_em", {"symbol": stock_code}),
-            ("stock_yjyg_em", {}),
-            ("stock_yjbb_em", {"symbol": stock_code}),
-            ("stock_yjbb_em", {}),
-        ])
+        # Earnings forecast (batch endpoint keyed by report period, not symbol)
+        forecast_df, forecast_source, forecast_errors = self._fetch_batch_and_filter(
+            "stock_yjyg_em",
+            stock_code,
+        )
         result["errors"].extend(forecast_errors)
         if forecast_df is not None:
             row = _extract_latest_row(forecast_df, stock_code)
@@ -355,11 +461,11 @@ class AkshareFundamentalAdapter:
                 )[:200]
                 result["source_chain"].append(f"earnings_forecast:{forecast_source}")
 
-        # Earnings quick report
-        quick_df, quick_source, quick_errors = self._call_df_candidates([
-            ("stock_yjkb_em", {"symbol": stock_code}),
-            ("stock_yjkb_em", {}),
-        ])
+        # Earnings quick report (batch endpoint keyed by report period, not symbol)
+        quick_df, quick_source, quick_errors = self._fetch_batch_and_filter(
+            "stock_yjkb_em",
+            stock_code,
+        )
         result["errors"].extend(quick_errors)
         if quick_df is not None:
             row = _extract_latest_row(quick_df, stock_code)
@@ -415,6 +521,7 @@ class AkshareFundamentalAdapter:
 
     def get_profit_snapshot(self, stock_code: str) -> Dict[str, Any]:
         """Return a lightweight profit snapshot for pricing use-cases."""
+        stock_code = _normalize_code(stock_code)
         result: Dict[str, Any] = {
             "status": "not_supported",
             "financial_report": {},
@@ -460,6 +567,7 @@ class AkshareFundamentalAdapter:
 
     def get_stock_capital_flow(self, stock_code: str) -> Dict[str, Any]:
         """Return stock-level capital flow only, without sector ranking calls."""
+        stock_code = _normalize_code(stock_code)
         result: Dict[str, Any] = {
             "status": "not_supported",
             "stock_flow": {},

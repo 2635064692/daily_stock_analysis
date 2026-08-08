@@ -106,13 +106,11 @@ class TestFundamentalAdapter(unittest.TestCase):
             "_call_df_candidates",
             side_effect=[
                 (fin_df, "stock_financial_abstract", []),
-                (forecast_df, "stock_yjyg_em", []),
-                (quick_df, "stock_yjkb_em", []),
                 (dividend_df, "stock_fhps_detail_em", []),
                 (None, None, []),
                 (None, None, []),
             ],
-        ):
+        ), patch.object(adapter, "_fetch_batch_and_filter", return_value=(None, None, [])):
             result = adapter.get_fundamental_bundle("600519")
 
         financial_report = result["earnings"].get("financial_report", {})
@@ -147,6 +145,65 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(result["financial_report"]["net_profit_parent"], 300.0)
         self.assertEqual(result["financial_report"]["report_date"], "2026-03-31")
         self.assertEqual(result["source_chain"], ["profit_snapshot:stock_financial_abstract"])
+
+    def test_extract_financial_metrics_parses_vertical_layout(self) -> None:
+        # AkShare stock_financial_abstract returns one row per indicator with
+        # report-period dates as columns (vertical layout). Ensure the latest
+        # period is picked and values map by indicator name.
+        from data_provider.fundamental_adapter import _extract_financial_metrics
+        df = pd.DataFrame(
+            {
+                "选项": ["常用指标", "常用指标", "常用指标"],
+                "指标": ["归母净利润", "营业总收入", "净资产收益率(ROE)"],
+                "20251231": [500.0, 8000.0, 10.0],
+                "20260331": [600.0, 9000.0, 12.0],
+            }
+        )
+        metrics, latest = _extract_financial_metrics(df)
+        self.assertEqual(latest, "20260331")
+        self.assertEqual(metrics["归母净利润"], 600.0)
+        self.assertEqual(metrics["营业总收入"], 9000.0)
+        self.assertEqual(metrics["净资产收益率(ROE)"], 12.0)
+
+    def test_extract_financial_metrics_returns_none_for_horizontal_layout(self) -> None:
+        from data_provider.fundamental_adapter import _extract_financial_metrics
+        df = pd.DataFrame(
+            {
+                "股票代码": ["600519"],
+                "报告期": ["2026-03-31"],
+                "营业总收入": [1000.0],
+            }
+        )
+        metrics, latest = _extract_financial_metrics(df)
+        self.assertIsNone(metrics)
+        self.assertIsNone(latest)
+
+    def test_fetch_batch_and_filter_probes_periods_and_filters_symbol(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        batch_df = pd.DataFrame(
+            {
+                "股票代码": ["000001", "002043"],
+                "业绩变动": ["预增", "预增"],
+                "公告日期": ["2026-01-01", "2026-01-02"],
+            }
+        )
+        import sys
+        import types
+        fake_ak = types.SimpleNamespace(
+            stock_yjyg_em=lambda date: batch_df,
+            stock_yjkb_em=lambda date: pd.DataFrame(),
+        )
+        with patch(
+            "data_provider.fundamental_adapter._recent_report_periods",
+            return_value=["20260331"],
+        ), patch.dict(sys.modules, {"akshare": fake_ak}):
+            df, source, errors = adapter._fetch_batch_and_filter(
+                "stock_yjyg_em", "002043.SZ"
+            )
+        self.assertEqual(source, "stock_yjyg_em")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["股票代码"], "002043")
 
     def test_stock_capital_flow_omits_sector_rankings_query(self) -> None:
         adapter = AkshareFundamentalAdapter()
