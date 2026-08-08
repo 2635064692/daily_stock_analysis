@@ -146,6 +146,20 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(result["financial_report"]["report_date"], "2026-03-31")
         self.assertEqual(result["source_chain"], ["profit_snapshot:stock_financial_abstract"])
 
+    def test_market_prefixed_code_adds_sz_sh_prefix(self) -> None:
+        from data_provider.fundamental_adapter import _market_prefixed_code
+        self.assertEqual(_market_prefixed_code("002043.SZ"), "sz002043")
+        self.assertEqual(_market_prefixed_code("600519"), "sh600519")
+        self.assertEqual(_market_prefixed_code("sz002043"), "sz002043")
+
+    def test_latest_report_date_is_quarter_end(self) -> None:
+        from data_provider.fundamental_adapter import _latest_report_date
+        d = _latest_report_date()
+        self.assertEqual(len(d), 8)
+        self.assertTrue(d.isdigit())
+        # MM should be 03/06/09/12
+        self.assertIn(d[4:6], {"03", "06", "09", "12"})
+
     def test_extract_financial_metrics_parses_vertical_layout(self) -> None:
         # AkShare stock_financial_abstract returns one row per indicator with
         # report-period dates as columns (vertical layout). Ensure the latest

@@ -2271,7 +2271,66 @@ class DataFetcherManager:
                 )
                 logger.debug(f"[{fetcher.name}] 获取所属板块失败: {e}")
                 continue
+
+        # Fallback: efinance get_belong_board is fronted by search_quote which
+        # can fail with JSONP parse errors; query push2 slist directly instead.
+        try:
+            boards = self._fetch_belong_boards_via_push2(stock_code)
+            if boards:
+                return boards
+        except Exception as e:
+            logger.debug(f"push2 slist 获取所属板块失败: {e}")
         return []
+
+    def _fetch_belong_boards_via_push2(self, stock_code: str) -> List[Dict[str, Any]]:
+        """Fetch belong boards from push2.eastmoney.com slist endpoint directly.
+
+        Secid is 0.<code> for SZ, 1.<code> for SH. Avoids efinance's search_quote
+        JSONP parsing and the WAF-blocked push2his endpoints.
+        """
+        import requests as _requests
+
+        code = normalize_stock_code(stock_code)
+        if not code or not code.isdigit():
+            return []
+        # 6xxxxx / 688xxx / 60xxxx -> SH(1), else SZ(0); BJ uses 0 too in slist.
+        secid_market = "1" if code.startswith(("6", "9")) else "0"
+        secid = f"{secid_market}.{code}"
+        params = {
+            "forcect": "1",
+            "spt": "3",
+            "fields": "f1,f12,f152,f3,f14,f128,f136",
+            "pi": "0",
+            "pz": "100",
+            "po": "1",
+            "fid": "f3",
+            "fid0": "f4003",
+            "invt": "2",
+            "secid": secid,
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36"}
+        resp = _requests.get(
+            "https://push2.eastmoney.com/api/qt/slist/get",
+            params=params,
+            headers=headers,
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        diff = (payload.get("data") or {}).get("diff")
+        if not diff:
+            return []
+        items = diff.values() if isinstance(diff, dict) else diff
+        boards: List[Dict[str, Any]] = []
+        seen = set()
+        for it in items:
+            name = str(it.get("f14") or "").strip()
+            bcode = str(it.get("f12") or "").strip()
+            if not name or bcode in seen:
+                continue
+            seen.add(bcode)
+            boards.append({"name": name, "code": bcode, "type": "board"})
+        return boards
 
     def prefetch_stock_names(self, stock_codes: List[str], use_bulk: bool = False) -> None:
         """
@@ -2994,7 +3053,11 @@ class DataFetcherManager:
             nonlocal remaining_seconds
             remaining_seconds = max(0.0, remaining_seconds - consumed_ms / 1000.0)
 
-        valuation_timeout = min(fetch_timeout, remaining_seconds)
+        # Valuation reuses the realtime-quote chain (Tencent first for CN). That
+        # path probes multiple sources and can take 4-7s, far beyond the default
+        # 3s fetch budget, so grant it a wider per-call allowance bounded by the
+        # remaining stage budget.
+        valuation_timeout = min(max(fetch_timeout, 8.0), remaining_seconds)
         if valuation_timeout > 0:
             quote_payload, valuation_err, valuation_ms = self._run_with_retry(
                 lambda: self.get_realtime_quote(stock_code),

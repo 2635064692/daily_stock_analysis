@@ -606,6 +606,31 @@ class TestFundamentalContext(unittest.TestCase):
             {"name": "消费", "code": "BK0475", "type": "概念"},
         )
 
+    def test_get_belong_boards_falls_back_to_push2_slist(self) -> None:
+        # efinance capability probe fails -> push2 slist direct call.
+        import types
+
+        fake_resp = types.SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "data": {
+                    "diff": {
+                        "0": {"f14": "建筑材料", "f12": "BK1208"},
+                        "1": {"f14": "装修建材", "f12": "BK0476"},
+                    }
+                }
+            },
+        )
+        with patch("requests.get", return_value=fake_resp) as get_mock:
+            manager = DataFetcherManager(fetchers=[])
+            boards = manager._fetch_belong_boards_via_push2("002043.SZ")
+
+        self.assertEqual(len(boards), 2)
+        self.assertEqual(boards[0], {"name": "建筑材料", "code": "BK1208", "type": "board"})
+        self.assertEqual(boards[1], {"name": "装修建材", "code": "BK0476", "type": "board"})
+        get_mock.assert_called_once()
+        self.assertEqual(get_mock.call_args.kwargs["params"]["secid"], "0.002043")
+
     def test_get_belong_boards_supports_extended_name_aliases_in_dict_payload(self) -> None:
         fetcher = _DummyBoardFetcher(
             "EfinanceFetcher",

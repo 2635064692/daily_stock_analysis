@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] AlphaSift `sector_rotation` 选股当日无 v2 快照时，先调用 `refresh_all` 创建当日快照行再回填 v2 分数，修复因 v2 仅回填已存在行导致当日刷新落空而误报「无可用v2板块」的问题。
 - [修复] 修复 `data_provider/fundamental_adapter.py` 与 akshare 1.18.64 接口兼容性：股票代码入参统一归一化（去 `.SZ/.SH` 后缀），`stock_yjyg_em`/`stock_yjkb_em` 改为按报告期批量拉取后按代码过滤，并适配 `stock_financial_abstract` 竖排指标布局，修复基本面财务数据（`financial_report`/`belong_boards`）获取不全的问题。
 - [修复] 个股资金流改为优先从 `datacenter-web.eastmoney.com` 的 `RPT_DMSK_TS_STOCKNEW` 报表接口获取（`push2his` 被 WAF 封锁的出口 IP 下仍可用），`push2his` 兜底；同时给 `_call_df_candidates` 的每个候选接口加超时控制并在超时后不阻塞线程，资金流整体耗时从 13s+ 降至 ~1s，避免超时阶段预算。
+- [修复] 板块归属在 efinance `search_quote` JSONP 解析失败时，自动降级直接调 `push2.eastmoney.com` 的 `slist` 接口（构造 secid），修复所属板块获取不到的问题。
+- [修复] 基本面估值阶段放宽单次调用超时到 8s（腾讯实时行情多源探测需 4-7s），修复 `fundamental_valuation timeout` 导致 PE/PB/市值缺失的问题。
+- [修复] 机构持仓 `stock_gdfx_top_10_em` 调用改为带市场前缀（`sz`/`sh`）+ 报告期 `date` 参数（该接口按季度返回全市场，纯数字代码会 KeyError），修复 `top10_holder_change` 缺失的问题。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 

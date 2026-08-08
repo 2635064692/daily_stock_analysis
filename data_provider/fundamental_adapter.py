@@ -169,6 +169,26 @@ def _normalize_report_date(value: Any) -> Optional[str]:
     return parsed.date().isoformat() if parsed else None
 
 
+def _market_prefixed_code(raw: Any) -> str:
+    """Return code with market prefix (sz/sh) for akshare endpoints that need it.
+
+    stock_gdfx_top_10_em expects e.g. sz002043 / sh600519 and raises KeyError
+    for plain codes.
+    """
+    code = _normalize_code(raw)
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _latest_report_date() -> str:
+    """Return the most recent quarter-end date as YYYYMMDD."""
+    now = datetime.now()
+    year, quarter = now.year, (now.month - 1) // 3 + 1
+    day = {1: 31, 2: 30, 3: 30, 4: 31}[quarter]
+    return f"{year}{quarter * 3:02d}{day:02d}"
+
+
 def _recent_report_periods(count: int = 1) -> List[str]:
     """Return recent quarter-end report periods as akshare date strings (YYYYMMDD).
 
@@ -586,8 +606,7 @@ class AkshareFundamentalAdapter:
                 result["source_chain"].append(f"institution:{inst_source}")
 
         top10_df, top10_source, top10_errors = self._call_df_candidates([
-            ("stock_gdfx_top_10_em", {"symbol": stock_code}),
-            ("stock_gdfx_top_10_em", {}),
+            ("stock_gdfx_top_10_em", {"symbol": _market_prefixed_code(stock_code), "date": _latest_report_date()}),
             ("stock_zh_a_gdhs_detail_em", {"symbol": stock_code}),
             ("stock_zh_a_gdhs_detail_em", {}),
         ])
